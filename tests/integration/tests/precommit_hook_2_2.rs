@@ -185,6 +185,7 @@ fn entity_command_bytes_with_id(
         command_id,
         entity_id: entity_id.to_string(),
         expected_revision,
+        instance_revision: None,
         operation: operation.to_owned(),
         arguments,
     };

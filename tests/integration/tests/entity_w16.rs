@@ -308,7 +308,9 @@ async fn spawn_server_with_checkpoint(
 }
 
 async fn spawn_server_with_rules(
-    world: World, instance: WorldInstance, checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    world: World,
+    instance: WorldInstance,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     rules: orbisync_server::input::InputRules,
 ) -> TestServer {
     let store = Arc::new(FakeWorldDirectoryStore::new());
@@ -1384,7 +1386,11 @@ async fn server_input_computes_delivers_replays_and_rejects() {
     exercise_input(server, instance_id, None).await;
 }
 
-async fn exercise_input(server: TestServer, instance_id: InstanceId, external: Option<external_rules::Service>) {
+async fn exercise_input(
+    server: TestServer,
+    instance_id: InstanceId,
+    external: Option<external_rules::Service>,
+) {
     let mut a = ws_connect(server.addr).await;
     let mut b = ws_connect(server.addr).await;
     handshake(&mut a, TICKET).await;
@@ -1392,56 +1398,127 @@ async fn exercise_input(server: TestServer, instance_id: InstanceId, external: O
     join_instance(&mut a, instance_id).await;
     join_instance(&mut b, instance_id).await;
     let entity = orbisync_domain::EntityId::generate();
-    a.send(Message::Binary(entity_command_bytes(entity, 0, "spawn",
-        Some(spawn_args_global(orbisync_domain::Vec3::new(0.0, 0.0, 0.0).unwrap())), 3).into())).await.unwrap();
+    a.send(Message::Binary(
+        entity_command_bytes(
+            entity,
+            0,
+            "spawn",
+            Some(spawn_args_global(
+                orbisync_domain::Vec3::new(0.0, 0.0, 0.0).unwrap(),
+            )),
+            3,
+        )
+        .into(),
+    ))
+    .await
+    .unwrap();
     expect_entity_applied(&mut a, entity).await;
     expect_entity_applied(&mut b, entity).await;
-    let intent = |dx| Struct { fields: [
-        ("rule".into(), string_value("example.move")),
-        ("intent".into(), Value { kind: Some(Kind::StructValue(Struct { fields: [
-            ("dx".into(), number_value(dx)),
-            ("x".into(), number_value(999.0)), // forged outcome is ignored
-        ].into() })) }),
-    ].into() };
+    let intent = |dx| Struct {
+        fields: [
+            ("rule".into(), string_value("example.move")),
+            (
+                "intent".into(),
+                Value {
+                    kind: Some(Kind::StructValue(Struct {
+                        fields: [
+                            ("dx".into(), number_value(dx)),
+                            ("x".into(), number_value(999.0)), // forged outcome is ignored
+                        ]
+                        .into(),
+                    })),
+                },
+            ),
+        ]
+        .into(),
+    };
     let id = uuid::Uuid::now_v7().to_string();
-    a.send(Message::Binary(entity_command_bytes_with_id(entity, 1, "input", Some(intent(1.0)), id.clone(), 4).into())).await.unwrap();
+    a.send(Message::Binary(
+        entity_command_bytes_with_id(entity, 1, "input", Some(intent(1.0)), id.clone(), 4).into(),
+    ))
+    .await
+    .unwrap();
     let accepted = expect_entity_applied(&mut a, entity).await;
     let peer = expect_entity_applied(&mut b, entity).await;
     assert_eq!(accepted.command_id, id);
     assert_eq!(accepted.operation, "update");
     assert_eq!(accepted.revision, 2);
     assert_eq!(accepted.arguments, peer.arguments);
-    assert_eq!(accepted.arguments.as_ref().unwrap().fields["x"], number_value(1.0));
-    a.send(Message::Binary(entity_command_bytes_with_id(entity, 1, "input", Some(intent(1.0)), id.clone(), 5).into())).await.unwrap();
+    assert_eq!(
+        accepted.arguments.as_ref().unwrap().fields["x"],
+        number_value(1.0)
+    );
+    a.send(Message::Binary(
+        entity_command_bytes_with_id(entity, 1, "input", Some(intent(1.0)), id.clone(), 5).into(),
+    ))
+    .await
+    .unwrap();
     let replay = expect_entity_applied(&mut a, entity).await;
     assert_eq!(replay.revision, 2);
     assert_eq!(replay.arguments, accepted.arguments);
     assert!(!try_recv_entity_command_for(&mut b, entity).await);
     // Reusing an identity for different intent must not compute a second mutation.
-    a.send(Message::Binary(entity_command_bytes_with_id(entity, 2, "input", Some(intent(-1.0)), id, 6).into())).await.unwrap();
+    a.send(Message::Binary(
+        entity_command_bytes_with_id(entity, 2, "input", Some(intent(-1.0)), id, 6).into(),
+    ))
+    .await
+    .unwrap();
     assert_eq!(expect_error(&mut a).await.code, "COMMAND_ID_CONFLICT");
-    a.send(Message::Binary(entity_command_bytes(entity, 2, "input", Some(intent(2.0)), 7).into())).await.unwrap();
+    a.send(Message::Binary(
+        entity_command_bytes(entity, 2, "input", Some(intent(2.0)), 7).into(),
+    ))
+    .await
+    .unwrap();
     assert_eq!(expect_error(&mut a).await.code, "INVALID_ARGUMENT");
-    b.send(Message::Binary(entity_command_bytes(entity, 2, "input", Some(intent(1.0)), 3).into())).await.unwrap();
+    b.send(Message::Binary(
+        entity_command_bytes(entity, 2, "input", Some(intent(1.0)), 3).into(),
+    ))
+    .await
+    .unwrap();
     assert_eq!(expect_error(&mut b).await.code, "INVALID_ARGUMENT");
     // A client cannot bypass computation by submitting the authoritative component.
-    a.send(Message::Binary(entity_command_bytes(entity, 2, "update", Some(update_args("example.position", 999)), 8).into())).await.unwrap();
+    a.send(Message::Binary(
+        entity_command_bytes(
+            entity,
+            2,
+            "update",
+            Some(update_args("example.position", 999)),
+            8,
+        )
+        .into(),
+    ))
+    .await
+    .unwrap();
     assert_eq!(expect_error(&mut a).await.code, "INVALID_ARGUMENT");
     if let Some(service) = external {
         assert_eq!(service.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         for (sequence, dx) in [(9, 3.0), (10, 4.0)] {
-            a.send(Message::Binary(entity_command_bytes(entity, 2, "input", Some(intent(dx)), sequence).into())).await.unwrap();
+            a.send(Message::Binary(
+                entity_command_bytes(entity, 2, "input", Some(intent(dx)), sequence).into(),
+            ))
+            .await
+            .unwrap();
             assert_eq!(expect_error(&mut a).await.code, "INVALID_ARGUMENT");
         }
         service.task.abort();
         let _ = service.task.await;
-        a.send(Message::Binary(entity_command_bytes(entity, 2, "input", Some(intent(1.0)), 11).into())).await.unwrap();
+        a.send(Message::Binary(
+            entity_command_bytes(entity, 2, "input", Some(intent(1.0)), 11).into(),
+        ))
+        .await
+        .unwrap();
         assert_eq!(expect_error(&mut a).await.code, "INVALID_ARGUMENT");
         assert!(!try_recv_entity_command_for(&mut b, entity).await);
     }
-    let entity = server._registry.read_entity(instance_id, entity).await.unwrap().unwrap();
+    let entity = server
+        ._registry
+        .read_entity(instance_id, entity)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(entity.revision().as_u64(), 2);
-    let position: serde_json::Value = serde_json::from_slice(&entity.components()["example.position"]).unwrap();
+    let position: serde_json::Value =
+        serde_json::from_slice(&entity.components()["example.position"]).unwrap();
     assert_eq!(position["x"], 1.0);
     a.close(None).await.unwrap();
     b.close(None).await.unwrap();

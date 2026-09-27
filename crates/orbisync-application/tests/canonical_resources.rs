@@ -4,10 +4,7 @@ use orbisync_application::checkpoint_record::canonical::{
     reader::{Progress, RecordDecoder, RecordKind},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/checkpoint_resource_allocator.rs"
-));
+include!("../../../tests/checkpoint_resource_allocator.rs");
 
 #[test]
 fn r3_compaction_overlap_and_cancellation() {

@@ -254,7 +254,7 @@ fn canonical_record_domain_shapes_and_unicode_rejection_result() {
             created_at_millis: i64::MAX - 86_400_000,
             expires_at_millis: i64::MAX,
             result: emit::ResultRef::Rejected {
-                code: "é\0",
+                code: "\u{e9}\0",
                 detail: &detail,
             },
         },
@@ -274,7 +274,7 @@ fn canonical_record_domain_shapes_and_unicode_rejection_result() {
     else {
         unreachable!()
     };
-    assert_eq!(code, "é\0");
+    assert_eq!(code, "\u{e9}\0");
     assert_eq!(restored_detail, detail);
     assert_eq!(restored.expires_at_millis, i64::MAX);
 }
@@ -399,9 +399,9 @@ fn string_emission_matches_serde_at_tiny_boundaries() {
     let all_controls: String = (0u8..=0x7f).map(char::from).collect();
     for input in [
         "",
-        "譌･譛ｬ隱橇洶/ﾃｩ\u{2028}",
+        "\u{65e5}\u{672c}\u{8a9e}\u{1f600}/\u{e9}\u{2028}",
         &all_controls,
-        &"\0\nｦ".repeat(8192),
+        &"\0\n\u{1f980}".repeat(8192),
     ] {
         let expected = serde_json::to_vec(input).unwrap();
         for window in [1, 2, 3, 7, 127] {
@@ -449,7 +449,7 @@ fn string_cancel_and_small_budget_do_not_advance() {
 fn string_reader_canonical_utf8_bounds_and_ownership() {
     let cancel = AtomicBool::new(false);
     let controls: String = (0..32).map(char::from).collect();
-    for text in ["日本語🦀é\u{2028}/", &controls, &"x".repeat(8192)] {
+    for text in ["日本語🦀\u{e9}\u{2028}/", &controls, &"x".repeat(8192)] {
         let bytes = serde_json::to_vec(text).unwrap();
         let mut reader = StringReader::new(text.len()).unwrap();
         let scratch = reader.scratch_bytes();

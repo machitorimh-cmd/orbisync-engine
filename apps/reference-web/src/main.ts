@@ -119,7 +119,7 @@ function ignite() {
     el("interaction").hidden = true;
     el("finish").hidden = false;
     el("result").textContent =
-        `かけら 5 / 5　 ·　冒険の時間 ${timeLabel(game.elapsed)}`;
+        `かけら 5 / 5　 ・　冒険の時間 ${timeLabel(game.elapsed)}`;
     chime([523.25, 659.25, 783.99, 1046.5]);
     el("again").focus();
 }
@@ -241,7 +241,7 @@ el<HTMLFormElement>("connect-form").onsubmit = async (event) => {
         el<HTMLInputElement>("password").value = "";
         el<HTMLDialogElement>("online-dialog").close();
         start();
-        el("mode").textContent = "オンライン · 接続済み";
+        el("mode").textContent = "オンライン ・ 接続済み";
         toast("同じルームの仲間と探索できます。");
     } catch (error) {
         const detail = error instanceof Error ? error.message : "";

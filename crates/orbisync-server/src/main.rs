@@ -57,13 +57,13 @@ use orbisync_transport_http::{HttpState, router};
 
 mod admin_password_recovery;
 mod checkpoint_operator_cli;
-mod periodic_tasks;
-mod retention;
-mod shutdown_deadline;
-mod web_admin;
 mod doctor;
 mod operational_diagnostics;
+mod periodic_tasks;
+mod retention;
 mod runtime_maintenance;
+mod shutdown_deadline;
+mod web_admin;
 
 /// Adapter for [`orbisync_application::InstanceMembershipStore`] backed by the
 /// live runtime registry.
@@ -619,7 +619,7 @@ enum Command {
     ExtensionToken {
         /// Registered extension UUIDv7.
         #[arg(long)]
-        extension_id: uuid::Uuid,
+        extension_id: Uuid,
         /// Granted scope; repeat for each capability and instance.
         #[arg(long, required = true)]
         scope: Vec<String>,
@@ -631,7 +631,7 @@ enum Command {
     ExtensionRevoke {
         /// Registered extension UUIDv7.
         #[arg(long)]
-        extension_id: uuid::Uuid,
+        extension_id: Uuid,
     },
     /// Serve HTTP traffic (default).
     Serve,
@@ -717,7 +717,8 @@ fn run() -> Result<std::process::ExitCode, ServerError> {
         no_browser,
     }) = &cli.command
     {
-        return web_admin::run(data_dir, *port, *no_browser, cli.config.as_deref()).map(|()| std::process::ExitCode::SUCCESS);
+        return web_admin::run(data_dir, *port, *no_browser, cli.config.as_deref())
+            .map(|()| std::process::ExitCode::SUCCESS);
     }
     let env = SystemEnv::new();
     if let Some(Command::ResetAdminPassword {
@@ -736,14 +737,16 @@ fn run() -> Result<std::process::ExitCode, ServerError> {
                 login_id,
                 password_denylist,
                 password_output,
-            )).map(|()| std::process::ExitCode::SUCCESS);
+            ))
+            .map(|()| std::process::ExitCode::SUCCESS);
     }
     if let Some(Command::CheckpointOperator { action }) = &cli.command {
         let path = Config::discover_path(cli.config.as_deref(), &env)?;
         let config = Config::load(path.as_deref(), &env, &cli.overrides())?.config;
         return build_runtime(config.server.worker_threads)
             .map_err(ServerError::Runtime)?
-            .block_on(checkpoint_operator_cli::run(action, &config, &env)).map(|()| std::process::ExitCode::SUCCESS);
+            .block_on(checkpoint_operator_cli::run(action, &config, &env))
+            .map(|()| std::process::ExitCode::SUCCESS);
     }
     if let Some(Command::Doctor { json }) = &cli.command {
         return run_doctor_command(&cli, &env, *json);
@@ -790,7 +793,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                     || registration.token_scopes.iter().any(|scope| !orbisync_application::extension_command::valid_scope(scope)) {
                     return Err(ServerError::ExtensionAdministration);
                 }
-                orbisync_storage_postgres::PgExtensionRegistrationStore::new(pool.clone())
+                PgExtensionRegistrationStore::new(pool.clone())
                     .save_registration(registration).await.map_err(|_| ServerError::ExtensionAdministration)?;
                 tracing::info!(event = "extension.registered");
                 Ok(())
@@ -2975,11 +2978,21 @@ mod tests {
         let source = include_str!("main.rs");
         let production = &source[..source.find("#[cfg(test)]").expect("test module")];
         let calls: Vec<_> = production.match_indices("persist_entity_events(").collect();
-        assert_eq!(calls.len(), 2, "one definition and one per-instance batch call");
-        let tick = production.find("let result = handle.tick(now, false)").unwrap();
-        let reap = production.find("let (events, persistence_events) = reap_idle_instance(").unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "one definition and one per-instance batch call"
+        );
+        let tick = production
+            .find("let result = handle.tick(now, false)")
+            .unwrap();
+        let reap = production
+            .find("let (events, persistence_events) = reap_idle_instance(")
+            .unwrap();
         assert!(tick < reap && reap < calls[1].0);
-        let drain = production.find("while let Some(joined) = tasks.join_next().await").unwrap();
+        let drain = production
+            .find("while let Some(joined) = tasks.join_next().await")
+            .unwrap();
         assert!(calls[1].0 < drain);
     }
 

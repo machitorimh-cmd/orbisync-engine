@@ -22,10 +22,7 @@ pub(super) struct Receipt {
 #[allow(clippy::unwrap_used)]
 mod resource_tests {
     use super::*;
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/checkpoint_resource_allocator.rs"
-    ));
+    include!("../../../../tests/checkpoint_resource_allocator.rs");
 
     #[test]
     fn resource_sqlx_binding_boundary_is_not_cooperative() {

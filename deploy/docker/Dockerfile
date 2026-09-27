@@ -19,6 +19,8 @@ COPY crates ./crates
 COPY tests ./tests
 COPY proto ./proto
 COPY migrations ./migrations
+# The server embeds the management UI at compile time.
+COPY apps/admin-web ./apps/admin-web
 
 RUN cargo build --release -p orbisync-server && \
     strip target/release/orbisync-server

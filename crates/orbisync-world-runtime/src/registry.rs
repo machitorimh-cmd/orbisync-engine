@@ -125,7 +125,7 @@ enum RuntimeTaskRequest {
         reply: oneshot::Sender<AdmissionResult>,
     },
     EntityRead {
-        id: orbisync_domain::EntityId,
+        id: EntityId,
         reply: oneshot::Sender<Option<Entity>>,
     },
     ReliableEvent {
@@ -703,10 +703,7 @@ impl InstanceHandle {
     }
 
     /// Reads one entity through the owning task; does not clone the full instance.
-    pub async fn read_entity_direct(
-        &self,
-        id: EntityId,
-    ) -> Result<Option<Entity>, &'static str> {
+    pub async fn read_entity_direct(&self, id: EntityId) -> Result<Option<Entity>, &'static str> {
         let (reply, response) = oneshot::channel();
         self.requests
             .send(RuntimeTaskRequest::EntityRead { id, reply })

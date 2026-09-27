@@ -163,10 +163,11 @@ function waitForEvent(
   predicate: (v: unknown) => boolean,
   timeoutMs: number,
 ): Promise<unknown> {
+  const timeoutError = new Error(`waitForEvent timeout event=${event}`);
   return new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => {
       instance.off(event, handler);
-      reject(new Error(`waitForEvent timeout event=${event}`));
+      reject(timeoutError);
     }, timeoutMs);
     const handler = (v: unknown) => {
       if (predicate(v)) {
@@ -219,6 +220,7 @@ describe("W-20 reconnect e2e (real server + real socket)", () => {
       await clientB.auth.login({ loginId: "bob", password: "any" });
       const connB = await clientB.connect();
       const instB = await connB.join(helper.instanceId);
+      instB.on("error", raw => console.error("peer error code:", (raw as { code?: string }).code));
       await waitForEvent(instB, "snapshot", () => true, 4000);
 
       const sentEvent = waitForEvent(instA, "domainEvent", () => true, 4000);

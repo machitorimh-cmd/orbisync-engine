@@ -8,10 +8,7 @@ use sqlx::{
 };
 type Error = sqlx::Error;
 macro_rules! err_protocol { ($($arg:tt)*) => { sqlx::Error::Protocol(format!($($arg)*)) }; }
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/checkpoint_resource_allocator.rs"
-));
+include!("../../../tests/checkpoint_resource_allocator.rs");
 
 mod io {
     use std::num::Saturating;
@@ -55,10 +52,7 @@ mod message {
         fn encode_body(&self, buf: &mut Vec<u8>) -> Result<(), crate::Error>;
     }
     pub mod pinned {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/support/sqlx_0_8_6_bind.rs"
-        ));
+        include!("support/sqlx_0_8_6_bind.rs");
     }
 }
 fn argument<'q, T: Encode<'q, Postgres>>(buffer: &mut PgArgumentBuffer, value: T) {

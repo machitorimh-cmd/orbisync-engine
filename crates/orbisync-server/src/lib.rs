@@ -17,5 +17,5 @@ pub mod realtime_ws;
 pub mod runtime_tick;
 pub mod shutdown;
 
-pub mod input;
 pub mod external_input;
+pub mod input;

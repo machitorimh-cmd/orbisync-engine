@@ -565,10 +565,7 @@ fn generation_bytes(cp: &Checkpoint) -> Vec<u8> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/checkpoint_resource_allocator.rs"
-    ));
+    include!("../../../../tests/checkpoint_resource_allocator.rs");
 
     #[test]
     fn resource_real_producer_maximum_identity_capacity() {

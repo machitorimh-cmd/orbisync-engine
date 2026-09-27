@@ -371,6 +371,7 @@ fn entity_command_payload_bytes(
         command_id: uuid::Uuid::now_v7().to_string(),
         entity_id: entity.to_string(),
         expected_revision: 0,
+        instance_revision: None,
         operation: operation.to_owned(),
         arguments: args,
     };

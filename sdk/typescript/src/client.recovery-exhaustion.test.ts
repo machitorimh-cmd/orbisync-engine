@@ -1,6 +1,6 @@
 import { it } from 'node:test';
 import assert from 'node:assert/strict';
-import { create } from '@bufbuild/protobuf';
+import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import { SyncError } from './sync_state.js';
 import { EnvelopeSchema } from './generated/orbisync/v1/realtime_pb.js';
 import { ServerHelloSchema } from './generated/orbisync/v1/realtime_pb.js';
@@ -10,9 +10,10 @@ const bytes = new TextEncoder().encode(JSON.stringify({format:'orbisync.snapshot
 it('independent04: recovery exhaustion must be terminal and immediately observable',async()=>{
  class Socket extends EventTarget {
    readyState=1;
+   private serverSequence=2n;
    send(data:Uint8Array) {
      if(decodeEnvelope(data).payload.case==='joinInstance') {
-       const receive=(payload:any)=>this.dispatchEvent(new MessageEvent('message',{data:encodeEnvelope(create(EnvelopeSchema,{instanceId:'room',payload}))}));
+       const receive=(payload:MessageInitShape<typeof EnvelopeSchema>['payload'])=>this.dispatchEvent(new MessageEvent('message',{data:encodeEnvelope(create(EnvelopeSchema,{instanceId:'room',sequence:this.serverSequence++,payload}))}));
        receive({case:'joinAccepted',value:{instanceRevision:100n}});
        receive({case:'snapshot',value:{snapshotId:'s',chunkCount:1,instanceRevision:100n,data:bytes}});
      }
