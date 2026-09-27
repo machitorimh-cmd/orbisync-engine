@@ -62,7 +62,7 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Build documentation
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --keep-going
         env:
           RUSTDOCFLAGS: -D warnings
 

@@ -530,7 +530,7 @@ impl InstanceActor {
 
     /// Shares a live-updating "spawn hook active" flag with this actor
     /// (ADR-025 "既知の迂回経路"). See the field doc comment on
-    /// [`Self::spawn_hook_active`]'s declaration for why this takes a
+    /// `Self::spawn_hook_active`'s declaration for why this takes a
     /// shared `Arc` rather than a `bool` snapshot.
     #[must_use]
     pub fn with_spawn_hook_active(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
