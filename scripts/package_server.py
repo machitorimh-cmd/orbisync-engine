@@ -93,6 +93,7 @@ def main():
             included.append((prefix / relative).as_posix())
         inventory.append({"name": package["name"], "version": package["version"],
                           "license": package.get("license"), "repository": package.get("repository"),
+                          "sourceArchive": f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download",
                           "files": included})
     (bundle / "THIRD-PARTY.json").write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
     build = {"release": args.version, "packageVersion": server["version"],
