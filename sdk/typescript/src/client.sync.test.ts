@@ -209,3 +209,34 @@ it("strict recovery still reaches ready via Resume and fresh Join", async () => 
     } finally { await conn.disconnect(); globalThis.WebSocket = OriginalWebSocket; }
   }
 });
+
+it("implicit sends use canonical revisions at flush and explicit revisions stay unchanged", async () => {
+  const socket = Object.assign(new Socket(), { bufferedAmount: 0 });
+  const conn = connection(socket);
+  try {
+    const instance = await conn.join("room");
+    await instance.ready();
+    Object.defineProperty(instance, "state", { get() { throw new Error("full state read"); } });
+    const sent: Envelope[] = [];
+    socket.send = data => { sent.push(decodeEnvelope(data)); };
+    const acknowledge = (revision: bigint) => socket.receive(create(EnvelopeSchema, {
+      payload: { case: "stateDelta", value: { fromRevision: 100n + revision - 1n,
+        toRevision: 100n + revision, entities: [{ entityId: "a", revision,
+          transform: { positionX: 1, rotationW: 1 } }] } },
+    }).payload);
+    acknowledge(1n);
+    instance.sendTransform({ entityId: "a", position: { x: 2, y: 0, z: 0 } });
+    socket.bufferedAmount = 1_000_000;
+    instance.sendEntityCommand({ entityId: "a", operation: "update", args: { value: 1 } });
+    instance.sendTransform({ entityId: "a", position: { x: 3, y: 0, z: 0 }, expectedRevision: 7n });
+    acknowledge(2n);
+    assert.equal(sent.length, 1, "congestion must keep both commands queued");
+    socket.bufferedAmount = 0;
+    instance._flush();
+    const revisions = sent.map(envelope => {
+      assert.ok(envelope.payload.case === "entityCommand" || envelope.payload.case === "transformInput");
+      return envelope.payload.value.expectedRevision;
+    });
+    assert.deepEqual(revisions, [1n, 2n, 7n]);
+  } finally { await conn.disconnect(); }
+});

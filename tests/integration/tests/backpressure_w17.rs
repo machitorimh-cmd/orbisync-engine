@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use orbisync_application::WorldDirectoryStore;
-use orbisync_domain::{InstanceId, Timestamp, Transform, World, WorldId, WorldInstance};
+use orbisync_domain::{
+    EntityId, EntityKind, InstanceId, Timestamp, Transform, UserId, VisibilityPolicy, World,
+    WorldId, WorldInstance,
+};
 use orbisync_interest::UniformGrid;
 use orbisync_protocol::v1::{Envelope, envelope};
 use orbisync_protocol::{PROTOCOL_MAJOR, WEBSOCKET_SUBPROTOCOL};
@@ -28,7 +31,10 @@ use orbisync_server::{
     realtime_ws::{RealtimeState, realtime_ws_handler},
 };
 use orbisync_testkit::{FakeWorldDirectoryStore, FixedClock};
-use orbisync_world_runtime::RuntimeRegistry;
+use orbisync_world_runtime::{
+    RuntimeRegistry,
+    command::{CommandOutcome, InstanceCommand, WorldPermissions},
+};
 use prost::Message as ProstMessage;
 use prost_types::{Struct, Value, value::Kind};
 use tokio::net::TcpListener;
@@ -362,18 +368,53 @@ fn state_delta_payload_bytes(
     buf
 }
 
-fn entity_command_payload_bytes(
-    entity: orbisync_domain::EntityId,
-    operation: &str,
-    args: Option<Struct>,
+async fn spawn_publication_bytes(
+    state: &RealtimeState,
+    instance_id: InstanceId,
+    entity: EntityId,
+    pos: orbisync_domain::Vec3,
 ) -> Vec<u8> {
+    // Direct delivery tests still need an authoritative visibility record.
+    // Never rely on client-provided arguments to authorize a publication.
+    let outcome = state
+        .registry
+        .submit(
+            instance_id,
+            InstanceCommand::SpawnEntity {
+                command_id: None,
+                entity_id: entity,
+                kind: EntityKind::Object,
+                owner: None,
+                transform: Some(
+                    Transform::new(
+                        pos,
+                        orbisync_domain::Quaternion::new(0.0, 0.0, 0.0, 1.0).expect("rotation"),
+                        orbisync_domain::Vec3::new(1.0, 1.0, 1.0).expect("scale"),
+                    )
+                    .expect("transform"),
+                ),
+                visibility: VisibilityPolicy::Global,
+                requester: UserId::generate(),
+                permissions: WorldPermissions::all(),
+            },
+        )
+        .await
+        .expect("actor available");
+    let CommandOutcome::Applied {
+        revision,
+        entity_revision: Some(entity_revision),
+        ..
+    } = outcome
+    else {
+        panic!("fixture spawn must apply");
+    };
     let cmd = orbisync_protocol::v1::EntityCommand {
         command_id: uuid::Uuid::now_v7().to_string(),
         entity_id: entity.to_string(),
-        expected_revision: 0,
-        instance_revision: None,
-        operation: operation.to_owned(),
-        arguments: args,
+        expected_revision: entity_revision.as_u64(),
+        instance_revision: Some(revision.as_u64()),
+        operation: "spawn".to_owned(),
+        arguments: Some(spawn_args_global(pos)),
     };
     let env = Envelope {
         protocol_major: PROTOCOL_MAJOR,
@@ -671,8 +712,8 @@ async fn backpressure_w17_reliable_not_dropped_by_latest() {
     // Then a reliable EntityCommand (spawn) for a new entity — must not be coalesced away
     let entity_reliable = orbisync_domain::EntityId::generate();
     let pos = orbisync_domain::Vec3::new(2.0, 0.0, 0.0).expect("vec");
-    let args = spawn_args_global(pos);
-    let reliable_payload = entity_command_payload_bytes(entity_reliable, "spawn", Some(args));
+    let reliable_payload =
+        spawn_publication_bytes(&server.state, instance_id, entity_reliable, pos).await;
     let _ = server.state.delivery.broadcast(
         instance_id,
         reliable_payload,
@@ -722,11 +763,13 @@ async fn backpressure_w17_reliable_overflow_disconnects() {
     // arrive in one try_recv burst before the handler drains. The handler will
     // drain 30 via try_recv into the queue; with capacity 16, the 17th reliable
     // push should overflow and trigger disconnect.
+    let mut payloads = Vec::new();
     for _ in 0..30 {
         let eid = orbisync_domain::EntityId::generate();
         let pos = orbisync_domain::Vec3::new(1.0, 0.0, 0.0).expect("vec");
-        let args = spawn_args_global(pos);
-        let payload = entity_command_payload_bytes(eid, "spawn", Some(args));
+        payloads.push(spawn_publication_bytes(&server.state, instance_id, eid, pos).await);
+    }
+    for payload in payloads {
         let _ = server.state.delivery.broadcast(
             instance_id,
             payload,
@@ -782,7 +825,7 @@ async fn backpressure_w17_reliable_overflow_disconnects() {
     }
 
     assert!(
-        got_overflow || got_close,
+        got_overflow && got_close,
         "Condition 4 RED: reliable overflow should disconnect with RELIABLE_QUEUE_OVERFLOW (or at least close). Got overflow={}, close={}",
         got_overflow,
         got_close

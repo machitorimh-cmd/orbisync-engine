@@ -43,6 +43,7 @@ async fn admission88_ticket_storage_finishes_accepted_request_and_refuses_new_on
     });
     // Public fixture key also used by the existing auth_w13 contract tests.
     let tokens = Arc::new(orbisync_identity::token::AccessTokenService::from_ed25519_private_pem(
+        // allow-hardcoded-secret: public auth_w13 fixture, included only inside lib.rs #[cfg(test)] mod tests.
             b"-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA1xcK2nctVkaHqStladAkbAg2dsR9j3I1r4gohGecsG\n-----END PRIVATE KEY-----\n",
             "orbisync", "orbisync-api", "test-key-1",
         ).expect("tokens"));

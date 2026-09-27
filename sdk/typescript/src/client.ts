@@ -790,7 +790,9 @@ export class OrbiSyncInstance {
     // first send. Retries keep the original payload for server deduplication.
     if (this.automaticRevisions.delete(envelope)
         && (envelope.payload.case === "entityCommand" || envelope.payload.case === "transformInput")) {
-      envelope.payload.value.expectedRevision = this.entityRevisions.get(envelope.payload.value.entityId) ?? 0n;
+      envelope.payload.value.expectedRevision = (this.sync?.enabled
+        ? this.sync.entityRevision(envelope.payload.value.entityId)
+        : this.entityRevisions.get(envelope.payload.value.entityId)) ?? 0n;
     }
     envelope.sequence = BigInt(this.nextSequence());
     envelope.sentAtUnixMs = BigInt(Date.now());

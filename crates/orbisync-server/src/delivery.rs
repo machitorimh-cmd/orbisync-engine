@@ -178,12 +178,12 @@ impl InstanceRegistrations {
     }
 
     fn remove_cell(&mut self, id: u64) {
-        if let Some(previous) = self.sink_cells.remove(&id) {
-            if let Some(ids) = self.cells.get_mut(&previous) {
-                ids.remove(&id);
-                if ids.is_empty() {
-                    self.cells.remove(&previous);
-                }
+        if let Some(previous) = self.sink_cells.remove(&id)
+            && let Some(ids) = self.cells.get_mut(&previous)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.cells.remove(&previous);
             }
         }
     }
