@@ -12,7 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOCKET_FILE = Path("crates/orbisync-server/src/realtime_ws_socket.rs")
 REALTIME_GLOB = "crates/orbisync-server/src/realtime_ws*.rs"
-IMPLEMENTATION_SEND = re.compile(r"\bself\.inner\.send\s*\(")
+IMPLEMENTATION_SEND = re.compile(
+    r"\bself\.inner\.send\s*\(|"
+    r"\bSocketTransport::WebSocket\(\s*(?P<socket>\w+)\s*\)\s*=>\s*"
+    r"(?P=socket)\.send\s*\("
+)
 MESSAGE_VARIANT = re.compile(r"\bMessage::(?:Binary|Text|Close|Ping|Pong)\b")
 SEND_CALL = re.compile(
     r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\.\s*send\s*\(\s*"
@@ -67,7 +71,8 @@ def inspect_socket_writes(root: Path = ROOT) -> dict[str, object]:
         implementation_count = len(IMPLEMENTATION_SEND.findall(socket_text))
 
     for path in realtime_files:
-        if path == socket_path:
+        # Dedicated test includes use controlled channels and client sockets.
+        if path == socket_path or path.name.startswith("realtime_ws_tests"):
             continue
         text = path.read_text(encoding="utf-8")
         for line_number in _direct_message_send_lines(text):

@@ -598,7 +598,8 @@ async fn e2e_interest_50m_is_culled() {
 
     let entity_a = orbisync_domain::EntityId::generate();
 
-    // Helper to receive a StateDelta containing `entity_a` and return its revision.
+    // Select the transform fragment; other fields of the previous revision
+    // can still be queued separately by latest-wins delivery.
     // Fails if an ErrorMessage is received (transform was rejected).
     async fn expect_delta_revision<S>(
         ws: &mut S,
@@ -618,7 +619,7 @@ async fn e2e_interest_50m_is_culled() {
                         if let Some(es) = delta
                             .entities
                             .iter()
-                            .find(|e| e.entity_id == entity.to_string())
+                            .find(|e| e.entity_id == entity.to_string() && e.transform.is_some())
                         {
                             return es.revision;
                         }
@@ -692,11 +693,9 @@ async fn e2e_interest_50m_is_culled() {
                     match ev {
                         Some(e) => match e.payload {
                             Some(envelope::Payload::StateDelta(delta)) => {
-                                if delta
-                                    .entities
-                                    .iter()
-                                    .any(|en| en.entity_id == entity_a.to_string())
-                                {
+                                if delta.entities.iter().any(|en| {
+                                    en.entity_id == entity_a.to_string() && en.revision >= new_rev_a
+                                }) {
                                     return true;
                                 }
                             }
@@ -1218,7 +1217,7 @@ async fn e2e_sent_at_is_fresh_per_delivery() {
                     if delta
                         .entities
                         .iter()
-                        .any(|e| e.entity_id == entity.to_string())
+                        .any(|e| e.entity_id == entity.to_string() && e.transform.is_some())
                     {
                         return ev;
                     }

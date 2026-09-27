@@ -162,7 +162,17 @@ async fn messages_during_chunked_join_are_delivered_after_the_complete_snapshot(
             .send(Message::Binary(encode_envelope(&event).into()))
             .await
             .unwrap();
-        recv_envelope(&mut sender).await.unwrap();
+        loop {
+            match recv_envelope(&mut sender).await.unwrap().payload {
+                // Creation can leave a separate properties fragment queued.
+                Some(envelope::Payload::StateDelta(_)) => continue,
+                Some(envelope::Payload::DomainEvent(ack)) => {
+                    assert_eq!(ack.event_id, event.message_id);
+                    break;
+                }
+                other => panic!("expected event acknowledgement, got {other:?}"),
+            }
+        }
     }
     server.clock.advance_millis(500);
     sender

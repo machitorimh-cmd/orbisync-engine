@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 include!("../../../tests/checkpoint_resource_allocator.rs");
 
 #[test]
+#[allow(clippy::panic)] // Test assertion: this fixture must decode to an Applied receipt.
 fn r3_compaction_overlap_and_cancellation() {
     use orbisync_application::checkpoint_record::{ReceiptResult, canonical::reader::Record};
     std::thread::Builder::new().stack_size(128 * 1024).spawn(|| {
