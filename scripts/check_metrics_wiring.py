@@ -469,6 +469,13 @@ def check_string_assembly(root: Path = ROOT) -> list[str]:
         # Find all format! occurrences with their string literal
         for mm in re.finditer(r'format!\s*\(\s*"([^"]*)"', raw):
             fmt_str = mm.group(1)
+            # ConfigError diagnostics name schema keys, not Prometheus metrics.
+            # Restrict this distinction to a direct `invalid` argument in the
+            # config model; metric construction elsewhere must still fail.
+            if (path.relative_to(root).as_posix() == "crates/orbisync-config/src/model.rs"
+                    and re.search(r"\binvalid\(\s*$", raw[:mm.start()])
+                    and re.fullmatch(r"auth\.\{method\}\.[a-z_]+", fmt_str)):
+                continue
             # Check if format string assembles metric name: `_total`/`_seconds`/`_bytes` appears after a `{`
             # e.g. "{}_total" -> `_total` after `{`
             # For static exposition line "process_cpu_seconds_total {cpu}\n", `_total` is before `{`, so not flagged.

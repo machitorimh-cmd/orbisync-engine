@@ -133,6 +133,20 @@ class MetricsWiringTests(unittest.TestCase):
         self.assertTrue(len(errors) > 0)
         self.assertTrue(any("_total" in e for e in errors))
 
+    def test_config_error_key_is_not_a_metric_but_other_assembly_still_fails(self) -> None:
+        _write_metrics(self.root, ["A"], [])
+        _write_production_file(
+            self.root, "orbisync-config", "model.rs",
+            'fn f() { invalid(format!("auth.{method}.session_ttl_seconds"), "zero"); }',
+        )
+        self.assertEqual(checker.check_string_assembly(self.root), [])
+        for source in [
+            'fn f() { let metric = format!("auth.{method}.session_ttl_seconds"); }',
+            'fn f() { invalid(format!("{method}_seconds"), "zero"); }',
+        ]:
+            _write_production_file(self.root, "orbisync-config", "model.rs", source)
+            self.assertTrue(checker.check_string_assembly(self.root))
+
     def test_string_assembly_allows_static_format_with_value_after(self) -> None:
         _write_metrics(self.root, ["A"], [])
         _write_production_file(
