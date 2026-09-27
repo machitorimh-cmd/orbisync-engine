@@ -16,22 +16,24 @@ access token、refresh token、realtime ticket、resume tokenは画面・ログ�
 
 ## 起動
 
-先にリポジトリrootでprotobuf生成とサーバー準備を行います。
+Node.js 24.xを使用します。先に[ルートREADME](../../README.md)のSDK生成・ビルド手順で、両Buf pluginの導入、`buf generate`、`npm --prefix sdk/typescript ci`、`npm --prefix sdk/typescript run build`を完了してください。このアプリはSDKの`dist/index.js`を参照するため、protobuf生成だけでは起動準備は完了しません。
+
+サーバーとアカウントは[Webセットアップ](../admin-web/README.md)またはルートREADMEのCLI手順で準備します。以下のCLI例には、PostgreSQLの起動、DB接続先・署名鍵などの環境変数設定が別途必要です。初期管理者の作成はユーザーがいないDBだけに実行してください。
 
 ```bash
-buf generate
 bash scripts/gen-dev-password-denylist.sh
 cargo run -p orbisync-server -- migrate
 cargo run -p orbisync-server -- bootstrap-admin \
   --login-id admin --display-name "Administrator" \
   --password-denylist deploy/dev-password-denylist.txt \
-  --password-output ./admin-password.txt
+  --password-output ../orbisync-initial-admin-password.txt
 ```
 
 APIをhostで起動する場合、Viteの2 originを明示的に許可してください。
 
 ```bash
 export ORBISYNC_CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+export ORBISYNC_PASSWORD_DENYLIST_FILE=deploy/dev-password-denylist.txt
 cargo run -p orbisync-server -- --config orbisync.toml.example
 ```
 

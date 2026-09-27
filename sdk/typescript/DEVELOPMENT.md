@@ -8,6 +8,8 @@ TypeScript SDK for OrbiSync realtime. The wire types are generated from `proto/o
 - `buf` CLI 1.72+ and both local plugins required by the root `buf.gen.yaml`: `protoc-gen-es` and `protoc-gen-prost`, available on PATH. CI installs `@bufbuild/protoc-gen-es@2.13.0` and `protoc-gen-prost` 0.5.0.
 - Rust workspace builds without it — SDK is optional
 
+The SDK CI job currently selects Node 22 even though this package requires Node 24.x. Use Node 24.x for local SDK work; the documentation does not imply that the current CI configuration satisfies that requirement. CI runs are manual (`workflow_dispatch`), not automatic on each push or PR.
+
 ## Generate the wire code
 
 Generated code is gitignored (ADR-004 — `.proto` is the source of truth, generated code is never committed). Generate after cloning and after changes to the proto source, before checking, testing, or packaging the SDK:
@@ -46,6 +48,15 @@ npm test --prefix sdk/typescript        # tsx --test src/**/*.test.ts (round-tri
 ```
 
 ## Use from an app / example
+
+For a local app depending on `file:../../sdk/typescript`, first generate the protocol code above, then build the SDK package entry point:
+
+```bash
+npm --prefix sdk/typescript ci
+npm --prefix sdk/typescript run build
+```
+
+The app imports `dist/index.js`; generating protocol code or installing the app alone does not build that entry point. This applies to `apps/reference-console-web`.
 
 ```bash
 # First obtain/build the SDK tarball as described below and place
