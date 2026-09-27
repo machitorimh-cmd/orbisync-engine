@@ -167,9 +167,7 @@ npm --prefix apps/reference-web run dev
 
 ## 検証と制約
 
-CI定義は [.github/workflows/ci.yml](.github/workflows/ci.yml) にあります。現在は **`workflow_dispatch` による手動実行のみ**で、pushやPRごとに自動実行されません。ジョブの存在は現在のコミットの合格を意味しません。
-
-**設定上の不一致:** SDKの `package.json` はNode.js 24.xを要求しますが、現在のSDK用CIジョブはNode.js 22を指定しています。ローカル開発ではSDKの24.x指定に従ってください。この文書更新ではCIやコードを変更していません。
+CIは `main` へのpushと `main` 向けPRで自動実行します。[実行結果](https://github.com/machitorimh-cmd/orbisync-engine/actions/workflows/ci.yml)を確認できます。SDKのCIはNode.js 24を使用します。
 
 目的に応じた検査コマンドの例です。今回実行したという記録ではありません。
 

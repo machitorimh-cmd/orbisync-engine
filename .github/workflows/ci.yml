@@ -23,11 +23,12 @@ name: CI
 # `pr-ci` aggregates every job. Configure it as the required status check so a
 # PR cannot merge while any item fails (`test-and-ci.md` §4.5 condition 12).
 
-# Manual trigger only. GitHub Actions free-tier minutes (2000/month) are
-# limited, so pull_request and push on main are intentionally omitted: PR
-# runs would duplicate main runs of already-verified content without
-# justifying the extra minutes. Run this workflow manually when needed.
+# Run automatically for the public repository, with manual reruns available.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -157,7 +158,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: "22"
+          node-version: "24"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: rustfmt, clippy, rust-docs
@@ -201,7 +202,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7

@@ -8,7 +8,7 @@ TypeScript SDK for OrbiSync realtime. The wire types are generated from `proto/o
 - `buf` CLI 1.72+ and both local plugins required by the root `buf.gen.yaml`: `protoc-gen-es` and `protoc-gen-prost`, available on PATH. CI installs `@bufbuild/protoc-gen-es@2.13.0` and `protoc-gen-prost` 0.5.0.
 - Rust workspace builds without it — SDK is optional
 
-The SDK CI job currently selects Node 22 even though this package requires Node 24.x. Use Node 24.x for local SDK work; the documentation does not imply that the current CI configuration satisfies that requirement. CI runs are manual (`workflow_dispatch`), not automatic on each push or PR.
+SDK CI uses Node 24, matching this package's requirement. CI runs automatically on pushes to `main` and pull requests targeting `main`; manual runs remain available through `workflow_dispatch`.
 
 ## Generate the wire code
 

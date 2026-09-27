@@ -167,9 +167,7 @@ Both the console and demo default to port 5173. When running them together, choo
 
 ## Verification and limitations
 
-The CI definition is [.github/workflows/ci.yml](.github/workflows/ci.yml). It currently supports **manual `workflow_dispatch` only**, not automatic runs on pushes or pull requests. A defined job does not establish that the current commit passed it.
-
-**Configuration mismatch:** the SDK's `package.json` requires Node.js 24.x, while its current CI job selects Node.js 22. Follow the SDK's 24.x requirement for local development. This documentation update does not modify CI or implementation code.
+CI runs automatically on pushes to `main` and pull requests targeting `main`. View the [run results](https://github.com/machitorimh-cmd/orbisync-engine/actions/workflows/ci.yml). SDK CI uses Node.js 24.
 
 Examples of checks to select for your task follow. This is not a record that these commands were run for this documentation update.
 
