@@ -1,0 +1,41 @@
+# ADR-011: TypeScript SDK release policy
+
+- Status: Proposed
+- Date: 2026-07-31
+
+## Context
+
+package名、browser/Node.js対応範囲、生成物、protocol/API versionとの結合、deprecation期間が未決定である。
+
+## Recommendation
+
+schema生成codeと手書き接続状態機械を分離し、npm packageはESM-firstとする。現行majorと直前majorを明示期間だけsupportし、test vectorsをserverと共有する。正本はSDKではなくOpenAPI、Proto、状態機械である。
+
+## Alternatives
+
+生成codeだけのpackageは状態機械を利用者へ押し付ける。serverと完全同一versionに固定すると独立更新が困難になる。
+
+## Decision trigger
+
+最初のSDK package scaffold前にruntime matrixとpackage名を確定する。
+
+## 改善④: 同期のwire境界（2026-09-18）
+
+同期実装に必要な最小Core/proto修正を許可された範囲で追加する。release policy全体のProposed状態は変更しない。
+
+- `EntityCommand.instance_revision`（optional uint64、field 6）はserver確定通知のinstance境界。未設定は旧server/旧保存結果を表し、0と同一視しない。既存`expected_revision`はspawn/updateの確定entity revision、deleteの確定instance revisionという意味を維持する。client要求では新フィールドを設定しない。spawn/updateのentity revisionはactorの同じ確定outcomeから取り、後続state再読取や予測加算で置き換えない。
+- production `ServerHello.enabled_features`へ `orbisync.state-sync.v1` をclientが要求した場合のみ返す。このfeatureは確定命令境界・一貫したSnapshot revision・購読引渡しの組を表す。旧clientはfeature要求なしで従来helloを受け、追加protobuf fieldを無視できる。SDK同期APIはfeature非対応serverを検出し、完全同期対応と表示しない。旧イベント利用の互換経路とtyped非対応通知はSDKで検証する。
+- Snapshotの結合キーはsnapshot_idであり、各chunkのmessage_idは異なる。JSON bytesとヘッダrevisionは同じ不変readから作る。ResumeAccepted.current_revisionも同じreadの境界で、現Coreはreplay_follows=trueの後に現在状態Snapshotを送る。ResyncRequiredだけでSnapshotは来ない。ConnectedでJoinInstanceを再送する回復は非対応なので、新socketのhello/joinが必要。
+- Snapshot read前に接続専用sinkを登録し、同じ有界OutboundQueueとregistrationをruntimeへ渡す。初期購読情報が確定するまでraw通知をそのqueueのreliable laneへ保留し、Snapshotの購読情報を適用してからfilter/drainする。handoff中は件数に加えて16 MiBで制限し、overflowは切断する。別の無界queueや送信中のactor lockは導入しない。Snapshot境界以前の遅延StateDelta/確定EntityCommandもdrain時に除外する。
+- spawnのargumentsはechoであり、Core custom componentを保存した証拠ではない。SDKがechoからcustom状態を捏造することを禁止する。白板はspawn確定後のcustom update確定によって本文・色等を保存し、途中参加/Resume/fresh joinの実Snapshotで確認する。
+
+純粋actor/encoder/registryテストは本番WS/PG E2Eとは区別する。複数chunk送信中の更新・購読窓・同ID再作成を実WSで別途確認する。
+
+### D1–D7レビュー後の追加契約
+
+- TransformのDeltaは、actor outcomeが所有する同commitのentityから生成する。propertiesの後続readは行わない。queueはinstance revisionをentity/field別に比較し、古い到着が新しい内容を置換しない。batched Deltaをfield単位に分け、異なるentity/fieldの唯一の値はevictしない。保持不能は明示切断として有限回復へ渡す。同境界同値は重複、同境界異値は矛盾。
+- SDKはsnapshot floor・entity生存期間・component別stamp・properties全mapの欠落境界を別々に保持する。単一最大revisionで別entityを捨てない。delete後の再spawnはentity revision 1を受理し、先着updateと遅延spawn/deleteを通常適用で解決する。
+- featureを合意したclientのJoinAcceptedでは重複nearby stateを省略し、chunk化されたSnapshotを正本とする。旧clientのJoinAcceptedと既存field意味は維持する。
+- clientが送ったserver専用instance_revisionは要求fingerprintから除外し、確定通知でCore値に置き換える。旧保存dedupの欠落値は補完せず、そのままreplayする。strict SDKは欠落をtyped非対応として終了し、再実行しない。
+- Structへ正確に入らない既存custom JSON数値は原bytesのbase64 envelopeを使用する。SDK送信のcustom数値はfiniteかつ整数ならsafe範囲に制限し、u64 revisionは別のbigint経路を使う。
+- SDKの資源上限と複製の保有範囲は[SDK設計](../design/client-sdk.md)に記載する。白板のcommand相関はstate reducerを持たず、payload総量も制限する。

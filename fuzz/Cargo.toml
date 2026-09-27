@@ -1,0 +1,53 @@
+[package]
+name = "orbisync-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+orbisync-config = { path = "../crates/orbisync-config" }
+orbisync-domain = { path = "../crates/orbisync-domain" }
+orbisync-realtime = { path = "../crates/orbisync-realtime" }
+toml = "0.9"
+
+[[bin]]
+name = "protobuf_decoder"
+path = "fuzz_targets/protobuf_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket_frame"
+path = "fuzz_targets/websocket_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "custom_component"
+path = "fuzz_targets/custom_component.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "login_id_parser"
+path = "fuzz_targets/login_id_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parser"
+path = "fuzz_targets/config_parser.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

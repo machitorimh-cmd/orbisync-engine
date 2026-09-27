@@ -1,0 +1,18 @@
+[package]
+name = "orbisync-world-directory"
+description = "OrbiSync world definitions and instance lifecycle coordination"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Dependency rule (`repo-crate-conventions.md` §3.2): `world-directory` depends on `domain` and `application`.
+[dependencies]
+async-trait = { workspace = true }
+orbisync-application = { workspace = true }
+orbisync-domain = { workspace = true }
+
+[lints]
+workspace = true

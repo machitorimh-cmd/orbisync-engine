@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="theme-color" content="#102d36" />
+        <title>星あかりの島 | OrbiSync</title>
+    </head>
+    <body>
+        <div id="world" aria-label="星あかりの島の3Dゲーム画面"></div>
+        <header class="topbar">
+            <a class="brand" href="./"
+                ><span class="brand-icon">✧</span
+                ><span>OrbiSync<small>星あかりの島</small></span></a
+            >
+            <div class="top-actions">
+                <span id="mode" class="badge">ひとりで探索</span
+                ><button id="sound" class="icon-button" aria-pressed="false">
+                    音：オフ</button
+                ><button id="help" class="icon-button">遊び方</button>
+            </div>
+        </header>
+        <main>
+            <section id="welcome" class="welcome panel">
+                <span class="eyebrow">小さな冒険、大きなあかり。</span>
+                <h1>この島に、<br />星あかりを。</h1>
+                <p>
+                    雲の上に浮かぶ、忘れられた島。<br />星のかけらを集めて、眠る灯台をともそう。
+                </p>
+                <div class="steps">
+                    <span><b>01</b> 島を歩く</span
+                    ><span><b>02</b> かけらを５つ集める</span
+                    ><span><b>03</b> 灯台をともす</span>
+                </div>
+                <button id="start" class="primary">
+                    冒険をはじめる <span>→</span></button
+                ><button id="online" class="secondary">友だちと同じ島へ</button
+                ><small class="note"
+                    >登録なしで、すぐにひとりで遊べます。</small
+                >
+            </section>
+            <section id="hud" class="mission panel" hidden>
+                <span class="eyebrow">島の灯台をともそう</span>
+                <div class="mission-heading">
+                    <h2 id="objective">星のかけらを集める</h2>
+                    <strong id="count">0 <span>/ 5</span></strong>
+                </div>
+                <div
+                    class="progress"
+                    role="progressbar"
+                    aria-label="集めた星のかけら"
+                    aria-valuemin="0"
+                    aria-valuemax="5"
+                    aria-valuenow="0"
+                >
+                    <i id="progress"></i>
+                </div>
+                <p id="hint">光るかけらに近づくと、拾えます。</p>
+                <div class="mission-bottom">
+                    <span id="target">✧ 次のかけら</span
+                    ><span id="timer">00:00</span>
+                </div>
+            </section>
+            <div id="toast" role="status" aria-live="polite"></div>
+            <div class="location">
+                <span class="location-dot"></span>雲海の庭<small
+                    >風が運ぶ、星の記憶。</small
+                >
+            </div>
+            <div id="interaction" hidden>
+                <button id="ignite" class="primary">
+                    E キー · 灯台をともす
+                </button>
+            </div>
+            <section
+                id="finish"
+                class="finish panel"
+                hidden
+                aria-labelledby="finish-title"
+            >
+                <span class="finish-star">✦</span
+                ><span class="eyebrow">冒険クリア</span>
+                <h2 id="finish-title">島に、あかりが戻った。</h2>
+                <p>
+                    あなたが集めた小さな星が、<br />遠くの旅人を導くあかりになりました。
+                </p>
+                <div id="result"></div>
+                <button id="again" class="primary">もう一度、冒険する ↻</button
+                ><button id="explore" class="secondary">
+                    このまま島を歩く
+                </button>
+            </section>
+            <div id="controls" class="controls" hidden>
+                <span
+                    ><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> /
+                    矢印で移動</span
+                ><span><kbd>Shift</kbd> 走る</span
+                ><span><kbd>Space</kbd> ジャンプ</span
+                ><button id="restart">やり直す</button>
+            </div>
+            <div id="touch" hidden>
+                <div class="dpad">
+                    <button data-key="arrowup" aria-label="奥へ移動">↑</button
+                    ><button data-key="arrowleft" aria-label="左へ移動">
+                        ←</button
+                    ><button data-key="arrowdown" aria-label="手前へ移動">
+                        ↓</button
+                    ><button data-key="arrowright" aria-label="右へ移動">
+                        →
+                    </button>
+                </div>
+                <button data-key=" " class="jump">ジャンプ</button>
+            </div>
+        </main>
+        <dialog id="help-dialog">
+            <button class="close" data-close aria-label="閉じる">×</button
+            ><span class="eyebrow">遊び方</span>
+            <h2>星を集めて、灯台へ。</h2>
+            <p>
+                島に散らばる金色のかけらを５つ集めましょう。近づくと自動で拾えます。全部集まったら中央の灯台に戻り、Eキーか画面のボタンであかりをともします。
+            </p>
+            <dl>
+                <dt>移動</dt>
+                <dd>WASD / 矢印キー / 画面の方向ボタン</dd>
+                <dt>走る</dt>
+                <dd>Shiftを押しながら移動</dd>
+                <dt>ジャンプ</dt>
+                <dd>スペース / ジャンプボタン</dd>
+            </dl>
+            <p class="note">
+                島の外には落ちません。時間制限もありません。自分のペースで探索してください。
+            </p>
+            <button class="primary" data-close>わかった</button>
+        </dialog>
+        <dialog id="online-dialog">
+            <button class="close" data-close aria-label="閉じる">×</button
+            ><span class="eyebrow">OrbiSync オンライン</span>
+            <h2>友だちと同じ島へ</h2>
+            <p>
+                同じルームIDで入ると、お互いの移動が見えます。かけらとクリア記録はプレイヤーごとです。
+            </p>
+            <form id="connect-form">
+                <label
+                    >サーバーURL<input
+                        id="server"
+                        type="url"
+                        value="http://localhost:8080"
+                        required /></label
+                ><label
+                    >ログインID<input
+                        id="login"
+                        autocomplete="username"
+                        required /></label
+                ><label
+                    >パスワード<input
+                        id="password"
+                        type="password"
+                        autocomplete="current-password"
+                        required /></label
+                ><label
+                    >ルームID（インスタンスID）<input
+                        id="room"
+                        placeholder="管理者から共有されたID"
+                        required
+                /></label>
+                <p id="connection-error" role="alert"></p>
+                <button id="connect" class="primary" type="submit">
+                    接続して冒険する →
+                </button>
+            </form>
+            <p class="note">
+                起動済みのOrbiSyncサーバーと作成済みのアカウント・ルームが必要です。
+            </p>
+        </dialog>
+        <script type="module" src="/src/main.ts"></script>
+    </body>
+</html>

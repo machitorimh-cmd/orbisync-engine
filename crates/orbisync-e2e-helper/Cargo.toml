@@ -1,0 +1,32 @@
+[package]
+name = "orbisync-e2e-helper"
+description = "E2E helper for SDK TypeScript reconnect tests — starts a real server with fake stores on 127.0.0.1:0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "orbisync-e2e-helper"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+prost-types = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+orbisync-application = { workspace = true }
+orbisync-config = { workspace = true }
+orbisync-domain = { workspace = true }
+orbisync-interest = { workspace = true }
+orbisync-realtime = { workspace = true }
+orbisync-protocol = { workspace = true }
+orbisync-server = { workspace = true }
+orbisync-testkit = { workspace = true }
+orbisync-world-runtime = { workspace = true }

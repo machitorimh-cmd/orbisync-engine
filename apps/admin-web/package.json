@@ -1,0 +1,1 @@
+{"name":"@orbisync/admin-web","private":true,"version":"0.1.0","description":"Embedded local OrbiSync setup and administration UI","type":"module","license":"MIT OR Apache-2.0","scripts":{"check":"node --check src/main.js"},"engines":{"node":">=18"}}

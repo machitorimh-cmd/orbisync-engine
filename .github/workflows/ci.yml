@@ -1,0 +1,412 @@
+name: CI
+
+# PR CI for the Rust workspace (`test-and-ci.md` §3.1).
+#
+# The ten mandatory items of specification §33.1 map onto these jobs:
+#
+# | § 33.1 item              | job                                        |
+# |--------------------------|--------------------------------------------|
+# | 1. format                | static-analysis (cargo fmt --check)        |
+# | 2. clippy                | static-analysis (cargo clippy -D warnings) |
+# | 3. unit tests            | build-and-test                             |
+# | 4. integration tests     | integration (PostgreSQL 16 and 17)         |
+# | 5. documentation build   | static-analysis (cargo doc)                |
+# | 6. dependency license    | supply-chain (cargo deny check licenses)   |
+# | 7. vulnerability audit   | supply-chain (cargo deny check advisories) |
+# | 8. protocol compatibility| design-and-protocol-validation             |
+# | 9. generated code policy | design-and-protocol-validation             |
+# | 10. migration check      | integration (migrations against a real DB) |
+#
+# `architecture` additionally enforces `repo-crate-conventions.md` §8.1
+# conditions 1 to 5, and `openapi` validates the REST contract.
+#
+# `pr-ci` aggregates every job. Configure it as the required status check so a
+# PR cannot merge while any item fails (`test-and-ci.md` §4.5 condition 12).
+
+# Manual trigger only. GitHub Actions free-tier minutes (2000/month) are
+# limited, so pull_request and push on main are intentionally omitted: PR
+# runs would duplicate main runs of already-verified content without
+# justifying the extra minutes. Run this workflow manually when needed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # PRs share a group by PR number; pushes/manual runs share the ref. A new
+  # update supersedes an older run for the same review or branch, while a
+  # post-merge main run remains independent of its originating PR run.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  build-and-test:
+    name: Build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Build
+        run: cargo build --workspace --all-features
+      - name: Unit, contract and doc tests
+        run: cargo test --workspace --all-features
+
+  architecture:
+    name: Dependency rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install OpenAPI route validator dependency
+        run: pip install pyyaml
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Check the allowed dependency matrix and acyclicity
+        run: python scripts/check_architecture.py
+      - name: Test extension loader dependency boundary
+        run: python -m unittest scripts/test_check_architecture.py
+      - name: Check source hygiene (encoding, mojibake)
+        run: python scripts/check_source_hygiene.py
+      - name: Check secret logging (no raw/prefix token in logs)
+        run: python scripts/check_secret_logging.py
+      - name: Check required env supply (CI-2)
+        run: python scripts/check_required_env_supply.py
+      - name: Check deny.toml advisories expires (CR-15)
+        run: python scripts/check_deny_expires.py
+      - name: Unit tests for npm audit policy gate
+        run: python -m unittest scripts/test_check_npm_audit.py
+      - name: Check HttpState wiring (IDEM-1)
+        run: python scripts/check_http_state_wiring.py
+      - name: Check HTTP handler fail-closed (AUD-C3)
+        run: python scripts/check_http_handler_fail_closed.py
+      - name: Check auth secrets (V-10)
+        run: python scripts/check_auth_secrets.py
+      - name: Check config usage
+        run: python scripts/check_config_usage.py
+      - name: Check metrics wiring (D1-A)
+        run: python scripts/check_metrics_wiring.py
+      - name: Check realtime ticket contract (C5)
+        run: python scripts/check_realtime_ticket_contract.py
+      - name: Check realtime sample contract (LOW-004)
+        run: python scripts/check_realtime_sample_contract.py
+      - name: Check realtime socket write boundary (C2)
+        run: python scripts/check_realtime_socket_writes.py
+      - name: Check realtime delivery queue boundary (C1)
+        run: python scripts/check_realtime_delivery_queue.py
+      - name: Check instance task ownership (C3)
+        run: python scripts/check_instance_task_ownership.py
+      - name: Unit tests for config usage gate
+        run: python -m unittest scripts/test_check_config_usage.py
+      - name: Unit tests for metrics wiring gate (D1-A)
+        run: python -m unittest scripts/test_check_metrics_wiring.py
+      - name: Unit tests for secret logging gate
+        run: python -m unittest scripts/test_check_secret_logging.py
+      - name: Unit tests for realtime socket write boundary
+        run: python -m unittest scripts/test_check_realtime_socket_writes.py
+      - name: Unit tests for realtime delivery queue boundary
+        run: python -m unittest scripts/test_check_realtime_delivery_queue.py
+      - name: Unit tests for realtime sample contract
+        run: python -m unittest scripts/test_check_realtime_sample_contract.py
+      - name: Unit tests for instance task ownership
+        run: python -m unittest scripts/test_check_instance_task_ownership.py
+      - name: Unit tests for restore verification runner
+        run: python -m unittest scripts/test_run_restore_verification.py
+      - name: Unit tests for OpenAPI route gate
+        run: python -m unittest scripts/test_validate_openapi_routes.py
+      - name: Zero-scan meta guard
+        run: python -m unittest scripts/test_zero_scan_guard.py
+      - name: Gate coverage (PREVENT-0)
+        run: python scripts/check_ci_gate_coverage.py
+
+  sdk-typescript:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cache-bin: true
+          shared-key: protocol-codegen
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-protoc-gen-es-2.13.0
+      # buf.gen.yaml requires two local plugins: protoc-gen-prost (Rust) and
+      # protoc-gen-es (TypeScript). Both must be on PATH before `buf generate`.
+      # Versions are pinned to avoid `latest` breakage; they match the
+      # workspace prost 0.14 and @bufbuild/protobuf 2.13.0 respectively.
+      - name: Install the code generation plugins
+        run: |
+          cargo install protoc-gen-prost --locked --version 0.5.0
+          npm install --global @bufbuild/protoc-gen-es@2.13.0
+      # Generated protobuf code is not committed (/generated/ and
+      # sdk/typescript/src/generated/ are ignored), so CI must generate it
+      # before the SDK can type-check or run.
+      - name: Generate protobuf bindings
+        run: npx --yes @bufbuild/buf generate
+      - name: Build e2e helper (real server for W-20 reconnect test)
+        run: cargo build -p orbisync-e2e-helper
+      - name: Install SDK dependencies
+        working-directory: sdk/typescript
+        run: npm ci
+      - name: Type-check
+        working-directory: sdk/typescript
+        run: npm run check
+      - name: Tests (round-trip + W-20 reconnect e2e with real server)
+        working-directory: sdk/typescript
+        run: npm test
+
+  npm-audit:
+    name: TypeScript dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install SDK dependencies from the lockfile
+        working-directory: sdk/typescript
+        run: npm ci --ignore-scripts
+      - name: Audit SDK dependencies (high severity threshold)
+        working-directory: sdk/typescript
+        run: |
+          set +e
+          npm audit --json --audit-level=high > "$RUNNER_TEMP/orbisync-npm-audit.json"
+          audit_status=$?
+          set -e
+          if [ "$audit_status" -gt 1 ]; then
+            echo "::error::npm audit command failed with status $audit_status"
+            exit "$audit_status"
+          fi
+          python ../../scripts/check_npm_audit.py \
+            "$RUNNER_TEMP/orbisync-npm-audit.json" \
+            ../../security/npm-audit-policy.json
+          echo "npm audit exit status: $audit_status (policy result above is authoritative)"
+
+  load-generator:
+    name: Load generator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: apps/load-generator
+      - name: Build load generator
+        run: cargo build --manifest-path apps/load-generator/Cargo.toml
+      - name: Test load generator
+        run: cargo test --manifest-path apps/load-generator/Cargo.toml --all-targets
+
+  fuzz-build:
+    name: Fuzz target build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Build fuzz targets
+        working-directory: fuzz
+        run: cargo +nightly fuzz build
+
+  compose-e2e:
+    name: Docker Compose E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Bring up the stack and use it
+        run: bash scripts/compose-e2e.sh
+
+  supply-chain:
+    name: Licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check licenses advisories bans sources
+
+  openapi:
+    name: OpenAPI validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install the validator
+        run: pip install openapi-spec-validator pyyaml
+      - name: Validate the OpenAPI documents
+        run: python scripts/validate_openapi.py
+      - name: Verify published contract is routable (W-26 live probe gate)
+        run: python scripts/validate_openapi_routes.py
+
+  integration:
+    name: Integration (PostgreSQL ${{ matrix.postgres.version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ADR-005: PostgreSQL 16 and 17 are the initial support targets and CI
+        # runs the integration tests against both.
+        postgres:
+          - version: "16"
+            digest: sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+          - version: "17"
+            digest: sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres.version }}@${{ matrix.postgres.digest }}
+        env:
+          POSTGRES_USER: orbisync
+          POSTGRES_PASSWORD: orbisync
+          POSTGRES_DB: orbisync
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orbisync"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://orbisync:orbisync@localhost:5432/orbisync
+      ORBISYNC_REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Generate ephemeral Ed25519 signing key
+        run: |
+          openssl genpkey -algorithm ed25519 -out /tmp/ed25519.pem
+          PEM_ESCAPED=$(awk '{printf "%s\\n", $0}' /tmp/ed25519.pem)
+          echo "ORBISYNC_TOKEN_SIGNING_KEY=${PEM_ESCAPED}" >> "$GITHUB_ENV"
+          echo "ORBISYNC_PAGINATION_HMAC_KEY=ci-only-pagination-hmac-key" >> "$GITHUB_ENV"
+          echo "ORBISYNC_REFRESH_TOKEN_HMAC_KEY=ci-only-refresh-hmac-key" >> "$GITHUB_ENV"
+          echo "ORBISYNC_REALTIME_TICKET_HMAC_KEY=ci-only-realtime-ticket-hmac-key" >> "$GITHUB_ENV"
+          echo "ORBISYNC_IDEMPOTENCY_HMAC_KEY=ci-only-idempotency-hmac-key" >> "$GITHUB_ENV"
+          echo "ORBISYNC_EXTENSION_TOKEN_HMAC_KEY=ci-only-extension-hmac-key-32-bytes" >> "$GITHUB_ENV"
+          rm -f /tmp/ed25519.pem
+      - name: Apply migrations
+        run: cargo run -p orbisync-server -- migrate
+      - name: Integration tests
+        run: cargo test -p orbisync-integration-tests --all-features
+
+  restore-drill:
+    name: Restore drill (PostgreSQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Generate ephemeral keys for restore drill
+        run: |
+          openssl genpkey -algorithm ed25519 -out /tmp/ed25519-restore.pem
+          PEM_ESCAPED=$(awk '{printf "%s\\n", $0}' /tmp/ed25519-restore.pem)
+          echo "ORBISYNC_TOKEN_SIGNING_KEY=${PEM_ESCAPED}" >> "$GITHUB_ENV"
+          echo "ORBISYNC_PAGINATION_HMAC_KEY=ci-only-pagination-hmac-key-for-restore-drill" >> "$GITHUB_ENV"
+          echo "ORBISYNC_REFRESH_TOKEN_HMAC_KEY=ci-only-refresh-hmac-key-for-restore-drill" >> "$GITHUB_ENV"
+          echo "ORBISYNC_REALTIME_TICKET_HMAC_KEY=ci-only-realtime-ticket-hmac-key-for-restore-drill" >> "$GITHUB_ENV"
+          echo "ORBISYNC_IDEMPOTENCY_HMAC_KEY=ci-only-idempotency-hmac-key-for-restore-drill" >> "$GITHUB_ENV"
+          echo "ORBISYNC_EXTENSION_TOKEN_HMAC_KEY=ci-only-extension-hmac-key-for-restore-drill" >> "$GITHUB_ENV"
+          rm -f /tmp/ed25519-restore.pem
+      - name: Run restore drill
+        run: bash scripts/restore-drill.sh
+
+  design-and-protocol-validation:
+    name: Design and protocol validation
+    uses: ./.github/workflows/design-validation.yml
+
+  pr-ci:
+    name: PR CI
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - static-analysis
+      - build-and-test
+      - architecture
+      - sdk-typescript
+      - npm-audit
+      - load-generator
+      - fuzz-build
+      - compose-e2e
+      - supply-chain
+      - openapi
+      - integration
+      - restore-drill
+      - design-and-protocol-validation
+    steps:
+      - name: Fail when any required job failed
+        run: |
+          echo "static-analysis: ${{ needs.static-analysis.result }}"
+          echo "build-and-test:  ${{ needs.build-and-test.result }}"
+          echo "architecture:    ${{ needs.architecture.result }}"
+          echo "sdk-typescript:  ${{ needs.sdk-typescript.result }}"
+          echo "npm-audit:       ${{ needs.npm-audit.result }}"
+          echo "load-generator: ${{ needs.load-generator.result }}"
+          echo "fuzz-build:     ${{ needs.fuzz-build.result }}"
+          echo "compose-e2e:     ${{ needs.compose-e2e.result }}"
+          echo "supply-chain:    ${{ needs.supply-chain.result }}"
+          echo "openapi:         ${{ needs.openapi.result }}"
+          echo "integration:     ${{ needs.integration.result }}"
+          echo "restore-drill:   ${{ needs.restore-drill.result }}"
+          echo "design-and-protocol-validation: ${{ needs.design-and-protocol-validation.result }}"
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "true" ]; then
+            echo "::error::a required PR CI item failed"
+            exit 1
+          fi

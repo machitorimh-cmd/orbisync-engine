@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "canonical_field": "ResumeSession.resume_token",
+  "client_hello_role": "optional_binding_hint",
+  "comparison": "constant_time",
+  "cases": [
+    {
+      "case": "client_hello_only",
+      "client_hello_present": true,
+      "resume_session_present": false,
+      "tokens_equal": null,
+      "decision": "do_not_start_resume",
+      "next_state": "ready",
+      "error": null
+    },
+    {
+      "case": "resume_session_only",
+      "client_hello_present": false,
+      "resume_session_present": true,
+      "tokens_equal": null,
+      "decision": "accept_resume_request",
+      "next_state": "resuming",
+      "error": null
+    },
+    {
+      "case": "both_equal",
+      "client_hello_present": true,
+      "resume_session_present": true,
+      "tokens_equal": true,
+      "decision": "accept_resume_request",
+      "next_state": "resuming",
+      "error": null
+    },
+    {
+      "case": "both_mismatch",
+      "client_hello_present": true,
+      "resume_session_present": true,
+      "tokens_equal": false,
+      "decision": "reject_resume",
+      "next_state": "ready",
+      "error": "resume_token_mismatch"
+    },
+    {
+      "case": "neither",
+      "client_hello_present": false,
+      "resume_session_present": false,
+      "tokens_equal": null,
+      "decision": "do_not_start_resume",
+      "next_state": "ready",
+      "error": null
+    }
+  ]
+}

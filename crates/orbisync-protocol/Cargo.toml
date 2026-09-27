@@ -1,0 +1,28 @@
+[package]
+name = "orbisync-protocol"
+description = "OrbiSync realtime wire contract: generated Protocol Buffers types and version negotiation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Dependency rule (`repo-crate-conventions.md` §3.2): `protocol` may depend on
+# `domain` only. Generated code is produced at build time into `OUT_DIR` and is
+# never committed (ADR-004), so it cannot be hand edited (§8 conditions 6, 7).
+[dependencies]
+orbisync-domain = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protox = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>OrbiSync Control</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <strong>OrbiSync</strong>
+            <small>CONTROL PLANE</small>
+          </div>
+        </div>
+        <nav aria-label="管理画面ナビゲーション">
+          <a href="#overview">概要</a><a href="#users">ユーザー</a><a href="#roles">ロール</a>
+          <a href="#worlds">World</a><a href="#instances">Instance</a><a href="#audit">監査ログ</a>
+        </nav>
+        <div class="sidebar-session">
+          <span class="eyebrow">SESSION</span><strong id="sessionUser">未ログイン</strong>
+          <span id="sessionDetail">認証情報はブラウザに保存しません</span>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">SERVER ENDPOINT</span>
+            <div class="server-controls">
+              <input id="serverUrl" type="url" value="http://127.0.0.1:8080" aria-label="サーバーURL" />
+              <button id="checkServerBtn" class="button secondary" type="button">接続確認</button>
+            </div>
+          </div>
+          <div id="connectionStatus" class="connection-state" data-state="unknown">
+            <span class="status-dot" aria-hidden="true"></span><span>未確認</span>
+          </div>
+        </header>
+
+        <section id="overview" class="panel hero-panel">
+          <div class="section-heading">
+            <div><span class="eyebrow">OVERVIEW</span><h1>運用ダッシュボード</h1><p>実サーバーの状態確認と管理操作を、この画面から行います。</p></div>
+            <button id="refreshOverviewBtn" class="icon-button" type="button" title="状態を再取得">↻</button>
+          </div>
+          <div class="status-grid">
+            <article class="metric-card"><span>LIVENESS</span><strong id="liveStatus">—</strong><small id="liveDetail">未確認</small></article>
+            <article class="metric-card"><span>READINESS</span><strong id="readyStatus">—</strong><small id="readyDetail">未確認</small></article>
+            <article class="metric-card"><span>VERSION</span><strong id="versionStatus">—</strong><small id="protocolStatus">protocol —</small></article>
+            <article class="metric-card accent-card"><span>AUTHENTICATION</span><strong id="authStatus">OFFLINE</strong><small id="authDetail">管理者ログインが必要です</small></article>
+          </div>
+          <form id="loginForm" class="login-form">
+            <label><span>ログインID</span><input id="loginId" name="login_id" autocomplete="username" required maxlength="128" /></label>
+            <label><span>パスワード</span><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024" /></label>
+            <button id="loginBtn" class="button primary" type="submit">管理者としてログイン</button>
+            <button id="logoutBtn" class="button danger-ghost" type="button" hidden>ログアウト</button>
+          </form>
+        </section>
+
+        <div id="protectedArea" hidden>
+          <section id="users" class="panel">
+            <div class="section-heading">
+              <div><span class="eyebrow">IDENTITY</span><h2>ユーザー管理</h2><p>アカウント作成、状態変更、パスワード再発行、ロール割り当て。</p></div>
+              <button id="refreshUsersBtn" class="button secondary" type="button">再読み込み</button>
+            </div>
+            <form id="createUserForm" class="inline-form">
+              <label><span>ログインID</span><input id="newLoginId" required maxlength="128" placeholder="player001" /></label>
+              <label><span>表示名</span><input id="newDisplayName" required maxlength="128" placeholder="Player One" /></label>
+              <button id="createUserBtn" class="button primary" type="submit">ユーザー作成</button>
+            </form>
+            <aside id="credentialPanel" class="secret-panel" hidden>
+              <div><span class="eyebrow">ONE-TIME CREDENTIAL</span><strong id="credentialUser">—</strong><p>この一時パスワードは再表示できません。安全な経路で本人へ渡してください。</p></div>
+              <code id="temporaryPassword"></code>
+              <button id="copyPasswordBtn" class="button secondary" type="button">コピー</button>
+              <button id="clearPasswordBtn" class="icon-button" type="button" aria-label="一時パスワードを画面から消去">×</button>
+            </aside>
+            <div class="table-wrap"><table><thead><tr><th>ログインID</th><th>表示名</th><th>状態</th><th>Rev.</th><th>ID</th><th>操作</th></tr></thead><tbody id="userTbody"></tbody></table></div>
+            <div class="table-footer"><span id="userCount">0 users</span><button id="nextUsersBtn" class="button secondary" type="button" hidden>さらに読み込む</button></div>
+          </section>
+
+          <section id="roles" class="panel">
+            <div class="section-heading">
+              <div><span class="eyebrow">ACCESS CONTROL</span><h2>ロール管理</h2><p>権限セットの作成・編集・削除と、ユーザーへの割り当て。</p></div>
+              <button id="refreshRolesBtn" class="button secondary" type="button">再読み込み</button>
+            </div>
+            <form id="createRoleForm" class="role-form">
+              <label><span>ロール名</span><input id="newRoleName" required maxlength="128" placeholder="moderator" /></label>
+              <label><span>説明</span><input id="newRoleDescription" maxlength="1024" placeholder="任意" /></label>
+              <label class="wide-field"><span>権限（カンマまたは改行区切り）</span><textarea id="newRolePermissions" required rows="3" placeholder="admin.users.read&#10;admin.worlds.read" aria-describedby="rolePermissionHelp"></textarea><small id="rolePermissionHelp">admin系とWorld系（例: world.instance.read）は別々のロールにしてください。</small></label>
+              <button id="createRoleBtn" class="button primary" type="submit">ロール作成</button>
+            </form>
+            <div class="table-wrap"><table><thead><tr><th>名前</th><th>説明</th><th>権限</th><th>Rev.</th><th>ID</th><th>操作</th></tr></thead><tbody id="roleTbody"></tbody></table></div>
+            <div class="table-footer"><span id="roleCount">0 roles</span><button id="nextRolesBtn" class="button secondary" type="button" hidden>さらに読み込む</button></div>
+          </section>
+
+          <section id="worlds" class="panel">
+            <div class="section-heading">
+              <div><span class="eyebrow">DIRECTORY</span><h2>World管理</h2><p>Worldを作成し、利用を終了したWorldをarchiveします。</p></div>
+              <button id="refreshWorldsBtn" class="button secondary" type="button">再読み込み</button>
+            </div>
+            <form id="createWorldForm" class="inline-form world-form">
+              <label><span>名前</span><input id="newWorldName" required maxlength="128" placeholder="Main Lobby" /></label>
+              <label><span>説明</span><input id="newWorldDescription" maxlength="1024" placeholder="任意" /></label>
+              <label><span>最大人数</span><input id="newWorldCapacity" type="number" required min="1" max="1000" value="100" /></label>
+              <button id="createWorldBtn" class="button primary" type="submit">World作成</button>
+            </form>
+            <div class="table-wrap"><table><thead><tr><th>名前</th><th>状態</th><th>Rev.</th><th>ID</th><th>操作</th></tr></thead><tbody id="worldTbody"></tbody></table></div>
+            <div class="table-footer"><span id="worldCount">0 worlds</span><button id="nextWorldsBtn" class="button secondary" type="button" hidden>さらに読み込む</button></div>
+          </section>
+
+          <section id="instances" class="panel">
+            <div class="section-heading">
+              <div><span class="eyebrow">RUNTIME</span><h2>Instance管理</h2><p>Instanceの作成、起動、停止、参加メンバーの確認とkick。</p></div>
+              <button id="refreshInstancesBtn" class="button secondary" type="button">再読み込み</button>
+            </div>
+            <form id="createInstanceForm" class="inline-form">
+              <label><span>World</span><select id="instanceWorldId" required><option value="">Worldを選択</option></select></label>
+              <label><span>最大人数（空欄でWorld設定）</span><input id="newInstanceCapacity" type="number" min="1" max="1000" placeholder="default" /></label>
+              <button id="createInstanceBtn" class="button primary" type="submit">Instance作成</button>
+            </form>
+            <div class="table-wrap"><table><thead><tr><th>Instance ID</th><th>World</th><th>状態</th><th>Rev.</th><th>操作</th></tr></thead><tbody id="instanceTbody"></tbody></table></div>
+            <div class="table-footer"><span id="instanceCount">0 instances</span><button id="nextInstancesBtn" class="button secondary" type="button" hidden>さらに読み込む</button></div>
+          </section>
+
+          <section id="audit" class="panel">
+            <div class="section-heading">
+              <div><span class="eyebrow">AUDIT TRAIL</span><h2>監査ログ</h2><p>管理操作の成功・失敗とrequest IDを確認できます。</p></div>
+              <button id="refreshAuditBtn" class="button secondary" type="button">再読み込み</button>
+            </div>
+            <div class="filter-row">
+              <label><span>action完全一致</span><input id="auditActionFilter" placeholder="user.created" /></label>
+              <button id="applyAuditFilterBtn" class="button secondary" type="button">絞り込む</button>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>日時</th><th>結果</th><th>Action</th><th>Actor</th><th>Resource</th><th>Request ID</th></tr></thead><tbody id="auditTbody"></tbody></table></div>
+            <div class="table-footer"><span id="auditCount">0 events</span><button id="nextAuditBtn" class="button secondary" type="button" hidden>さらに読み込む</button></div>
+          </section>
+        </div>
+
+        <section class="panel activity-panel">
+          <div class="section-heading compact"><div><span class="eyebrow">LOCAL ACTIVITY</span><h2>操作ログ</h2></div><button id="clearLogBtn" class="button secondary" type="button">消去</button></div>
+          <ol id="activityLog" aria-live="polite"></ol>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="roleDialog">
+      <form method="dialog" class="dialog-card">
+        <div class="section-heading compact"><div><span class="eyebrow">ROLE ASSIGNMENT</span><h2 id="roleDialogTitle">ロール割り当て</h2></div><button class="icon-button" value="cancel" aria-label="閉じる">×</button></div>
+        <p>チェックしたロールで現在の割り当てを完全に置き換えます。</p>
+        <div id="roleCheckboxes" class="checkbox-list"></div>
+        <div class="dialog-actions"><button value="cancel" class="button secondary">キャンセル</button><button id="saveUserRolesBtn" type="button" class="button primary">保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="editUserDialog">
+      <form id="editUserForm" class="dialog-card">
+        <div class="section-heading compact"><div><span class="eyebrow">USER PROFILE</span><h2 id="editUserDialogTitle">表示名を編集</h2></div><button id="closeEditUserBtn" class="icon-button" type="button" aria-label="閉じる">×</button></div>
+        <label><span>表示名</span><input id="editUserDisplayName" required maxlength="128" /></label>
+        <p class="revision-note">保存時に現在のrevisionを照合します。競合した場合は一覧を再読み込みしてください。</p>
+        <div class="dialog-actions"><button id="cancelEditUserBtn" type="button" class="button secondary">キャンセル</button><button id="saveEditUserBtn" type="submit" class="button primary">保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="editRoleDialog">
+      <form id="editRoleForm" class="dialog-card wide-dialog">
+        <div class="section-heading compact"><div><span class="eyebrow">ROLE POLICY</span><h2 id="editRoleDialogTitle">ロールを編集</h2></div><button id="closeEditRoleBtn" class="icon-button" type="button" aria-label="閉じる">×</button></div>
+        <label><span>ロール名</span><input id="editRoleName" required maxlength="128" /></label>
+        <label><span>説明</span><input id="editRoleDescription" maxlength="1024" /></label>
+        <label><span>権限（カンマまたは改行区切り）</span><textarea id="editRolePermissions" required rows="5" aria-describedby="editRolePermissionHelp"></textarea><small id="editRolePermissionHelp">admin系とWorld系は別々のロールにしてください。</small></label>
+        <p class="revision-note">保存時に現在のrevisionを照合します。割り当て済みロールの削除はサーバーが拒否します。</p>
+        <div class="dialog-actions"><button id="cancelEditRoleBtn" type="button" class="button secondary">キャンセル</button><button id="saveEditRoleBtn" type="submit" class="button primary">保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="membersDialog">
+      <form method="dialog" class="dialog-card wide-dialog">
+        <div class="section-heading compact"><div><span class="eyebrow">INSTANCE MEMBERS</span><h2 id="membersDialogTitle">参加メンバー</h2></div><button class="icon-button" value="cancel" aria-label="閉じる">×</button></div>
+        <div class="table-wrap"><table><thead><tr><th>User ID</th><th>操作</th></tr></thead><tbody id="memberTbody"></tbody></table></div>
+      </form>
+    </dialog>
+
+    <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "cases": [
+    {"name":"major_mismatch","mutate":{"protocol_major":2},"expected":"reject_connection"},
+    {"name":"zero_sequence","mutate":{"sequence":0},"expected":"protocol_error"},
+    {"name":"missing_message_id","remove":"message_id","expected":"protocol_error"},
+    {"name":"oversized_normal_message","encoded_size":16385,"expected":"close_1009"},
+    {
+      "name":"reused_command_id_different_payload",
+      "first":{"command_id":"0192d43d-a18a-7fed-8123-1123456789ab","entity_id":"0192d43d-a18a-7fed-8123-2123456789ab","expected_revision":7,"operation":"update"},
+      "retry":{"command_id":"0192d43d-a18a-7fed-8123-1123456789ab","entity_id":"0192d43d-a18a-7fed-8123-2123456789ab","expected_revision":7,"operation":"delete"},
+      "expected":"protocol_error"
+    }
+  ]
+}

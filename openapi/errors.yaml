@@ -1,0 +1,41 @@
+version: 1
+errors:
+  - code: INVALID_REQUEST
+    status: 400
+    retryable: false
+  - code: AUTHENTICATION_REQUIRED
+    status: 401
+    retryable: false
+  - code: ACCESS_DENIED
+    status: 403
+    retryable: false
+  - code: AUTH_METHOD_DISABLED
+    status: 403
+    retryable: false
+  - code: RESOURCE_NOT_FOUND
+    status: 404
+    retryable: false
+  - code: IDEMPOTENCY_KEY_REUSED
+    status: 409
+    retryable: false
+  - code: IDEMPOTENCY_IN_PROGRESS
+    status: 409
+    retryable: true
+  - code: RESOURCE_CONFLICT
+    status: 409
+    retryable: false
+  - code: REVISION_MISMATCH
+    status: 412
+    retryable: false
+  - code: RATE_LIMITED
+    status: 429
+    retryable: true
+  - code: PAYLOAD_TOO_LARGE
+    status: 413
+    retryable: false
+  - code: INTERNAL_ERROR
+    status: 500
+    retryable: true
+  - code: SERVICE_UNAVAILABLE
+    status: 503
+    retryable: true

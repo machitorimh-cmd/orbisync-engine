@@ -1,0 +1,22 @@
+{
+  "description": "Minimal valid ClientHello envelope",
+  "subprotocol": "orbisync.v1.protobuf",
+  "envelope": {
+    "protocol_major": 1,
+    "protocol_minor": 0,
+    "message_id": "018f3f6e-7b2a-7abc-8def-0123456789ab",
+    "sequence": 1,
+    "sent_at_unix_ms": 1785481200000,
+    "client_hello": {
+      "supported_minor_min": 0,
+      "supported_minor_max": 0,
+      "realtime_ticket": "redacted-test-ticket",
+      "client_name": "contract-test",
+      "client_version": "0.0.0",
+      "client_type": "desktop",
+      "supported_compressions": [],
+      "supported_features": [],
+      "resume_token": ""
+    }
+  }
+}

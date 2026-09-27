@@ -1,0 +1,79 @@
+name: Design validation
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Validate design artifacts
+        run: |
+          python scripts/validate_design.py --review
+          python -m unittest scripts/test_validate_design.py
+          pip install pyyaml
+          python scripts/validate_openapi_routes.py
+
+  buf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-docs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cache-bin: true
+          shared-key: protocol-codegen
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-protoc-gen-es-2.13.0
+      - name: Lint Protocol Buffers
+        run: buf lint
+      - name: Check Protocol Buffer compatibility
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          if git cat-file -e "origin/${{ github.base_ref }}:proto" 2>/dev/null; then
+            buf breaking --against ".git#branch=origin/${{ github.base_ref }}"
+          else
+            echo "No Proto baseline on base branch; lint is the initial compatibility gate."
+          fi
+      # Generated code is never committed (ADR-004). Generation may write only
+      # below ignored paths: any tracked change or non-ignored untracked output
+      # fails this required gate (`repo-crate-conventions.md` §8.2 conditions
+      # 6, 7).
+      - name: Install the code generation plugins
+        run: |
+          cargo install protoc-gen-prost --locked --version 0.5.0
+          npm install --global @bufbuild/protoc-gen-es@2.13.0
+      - name: Verify generated code policy
+        shell: bash
+        run: |
+          test -d proto
+          buf generate
+          cargo build -p orbisync-protocol
+          git diff --exit-code
+          untracked="$(git ls-files --others --exclude-standard)"
+          if [ -n "$untracked" ]; then
+            echo "::error::buf generate produced non-ignored untracked files:"
+            echo "$untracked"
+            exit 1
+          fi
+      - name: Check for handwritten protobuf definitions
+        run: python scripts/check_no_handwritten_proto.py

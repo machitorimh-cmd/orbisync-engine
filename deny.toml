@@ -1,0 +1,57 @@
+# cargo-deny configuration (`test-and-ci.md` §3.5).
+#
+# The license allowlist and the advisory policy are the PR CI security gates
+# for dependency licensing and known vulnerabilities. The final policy owner is
+# ADR-010, which is Accepted; this file enforces that policy in CI.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# RUSTSEC-2023-0071: Marvin Attack in rsa crate.
+# 到達不能の根拠: EdDSA(Ed25519)のみを使用し、RSA の署名・検証経路を一切呼ばない。
+# rsa は jsonwebtoken 11 の rust_crypto feature に束ねられており、ed25519 だけを選ぶ
+# 分離ができないためビルドに含まれる。
+# 代替案: aws_lc_rs backend に切り替えれば rsa 依存は消える。Linux では成立する見込みだが、
+# 開発機(Windows)で NASM が無く未検証のため今回は見送った。将来の恒久対応はこちら。
+# expires = 2027-02-22
+# See https://rustsec.org/advisories/RUSTSEC-2023-0071
+ignore = ["RUSTSEC-2023-0071"]
+
+[licenses]
+version = 2
+# OrbiSync itself is `MIT OR Apache-2.0` (RL-05). Dependencies must be usable
+# under those terms.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies intentionally have no published version
+# requirement. External wildcard requirements remain denied.
+allow-wildcard-paths = true
+# Framework placement is enforced by `scripts/check_architecture.py`.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

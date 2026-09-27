@@ -1,0 +1,72 @@
+name: Dependency audit
+
+# This workflow is intentionally separate from the full CI suite. Manual
+# trigger only. GitHub Actions free-tier minutes (2000/month) are limited,
+# so the weekly schedule is intentionally omitted; run this workflow
+# manually when needed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-advisories:
+    name: Rust advisories (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The repository has one workspace lockfile and two intentionally
+          # standalone Rust projects with their own lockfiles.
+          - name: workspace
+            manifest: Cargo.toml
+          - name: load-generator
+            manifest: apps/load-generator/Cargo.toml
+          - name: fuzz
+            manifest: fuzz/Cargo.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check advisories
+          manifest-path: ${{ matrix.manifest }}
+          # deny.toml is shared by all three graphs and lives at the repo root.
+          arguments: --all-features --config /github/workspace/deny.toml
+
+  sdk-typescript-advisories:
+    name: TypeScript SDK advisories (npm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install SDK dependencies from the lockfile
+        working-directory: sdk/typescript
+        run: npm ci --ignore-scripts
+      - name: Audit SDK dependencies (high severity threshold)
+        working-directory: sdk/typescript
+        run: |
+          set +e
+          npm audit --json --audit-level=high > "$RUNNER_TEMP/orbisync-npm-audit.json"
+          audit_status=$?
+          set -e
+          if [ "$audit_status" -gt 1 ]; then
+            echo "::error::npm audit command failed with status $audit_status"
+            exit "$audit_status"
+          fi
+          python ../../scripts/check_npm_audit.py \
+            "$RUNNER_TEMP/orbisync-npm-audit.json" \
+            ../../security/npm-audit-policy.json
+          echo "npm audit exit status: $audit_status (policy result above is authoritative)"

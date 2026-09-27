@@ -1,0 +1,19 @@
+[package]
+name = "orbisync-interest"
+description = "OrbiSync interest management: pure visibility and subscription computation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Dependency rule (`repo-crate-conventions.md` §3.2): `interest` depends on `domain` only and performs no I/O.
+[dependencies]
+orbisync-domain = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

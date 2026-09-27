@@ -1,0 +1,215 @@
+# OrbiSync example configuration (`observability-and-config.md` §6.5).
+#
+# Every value below is the built-in default; the file exists to document the
+# schema. Copy it, change what you need, and start the server with
+# Configuration search order:
+# 1. --config <path>
+# 2. ORBISYNC_CONFIG_FILE
+# 3. ./orbisync.toml
+# 4. /etc/orbisync/orbisync.toml
+# Start with `cargo run -p orbisync-server -- --config path/to/orbisync.toml`.
+#
+# Secrets are never written here. The `*_env` settings below name the
+# environment variables that carry the secret values. The token
+# signing variable must contain an Ed25519 private key in PKCS#8 PEM form.
+# The HMAC variables must each be present and non-empty; use separate,
+# randomly generated values for refresh tokens, realtime tickets,
+# pagination cursors, and idempotency requests.
+
+[server]
+# Keep the example server loopback-bound. Compose sets its container bind
+# separately and publishes it on the host loopback by default.
+bind = "127.0.0.1:8080"
+# Comma-separated exact proxy IPs or typed CIDRs; blank means no proxy trust.
+trusted_proxies = ""
+worker_threads = 0
+# The largest body is the 1 MiB CSV import; 2 MiB is twice that size.
+max_request_body_bytes = 2097152
+# Total deadline for ordinary HTTP request body reads and handler execution.
+request_timeout_seconds = 30
+page_default_limit = 50
+page_max_limit = 200
+shutdown_drain_timeout_seconds = 30
+shutdown_force_timeout_seconds = 10
+
+[cors]
+# Deny browser cross-origin requests by default. For the local admin UI use:
+# allowed_origins = ["http://localhost:5174", "http://127.0.0.1:5174"]
+# In production, list only the exact HTTPS origin that serves the admin UI.
+allowed_origins = []
+allow_credentials = false
+
+[database]
+url_env = "DATABASE_URL"
+max_connections = 20
+acquire_timeout_seconds = 2
+readiness_timeout_seconds = 3
+
+[auth]
+access_token_ttl_seconds = 900
+refresh_token_ttl_seconds = 2592000
+password_min_length = 12
+token_signing_key_env = "ORBISYNC_TOKEN_SIGNING_KEY"
+pagination_hmac_key_env = "ORBISYNC_PAGINATION_HMAC_KEY"
+refresh_token_hmac_key_env = "ORBISYNC_REFRESH_TOKEN_HMAC_KEY"
+realtime_ticket_hmac_key_env = "ORBISYNC_REALTIME_TICKET_HMAC_KEY"
+idempotency_hmac_key_env = "ORBISYNC_IDEMPOTENCY_HMAC_KEY"
+argon2_memory_cost_kib = 65536
+argon2_iterations = 3
+argon2_parallelism = 1
+password_hash_concurrency = 4
+login_failure_threshold = 5
+lockout_duration_seconds = 900
+
+# Enabled authentication methods (ADR-026). `local` alone reproduces the
+# behaviour from before ADR-026; every other method is opt-in.
+# Accepted values: "local", "guest", "name_only", "external".
+methods = ["local"]
+
+# Guest participation (ADR-026 section 3). Only read while "guest" is in
+# auth.methods. Enabling it with an empty role_names or allowed_worlds fails
+# startup: a subject with no role is denied everything, and one with no world
+# boundary could join anywhere, so neither empty value means "unrestricted".
+[auth.guest]
+role_names = []
+# Absolute lifetime of a guest. Repeated refresh cannot extend it.
+session_ttl_seconds = 3600
+# Grace before the revocation job runs. This does NOT extend access: expiry is
+# enforced by comparing the clock against the stored deadline.
+retention_seconds = 86400
+# World ids a guest may join, snapshotted when the session is issued.
+allowed_worlds = []
+display_name_prefix = "Guest"
+
+# Name-only participation. Same shape as guest; the difference is that the
+# display name the visitor typed is kept, where a guest gets a generated one.
+[auth.name_only]
+role_names = []
+session_ttl_seconds = 3600
+retention_seconds = 86400
+allowed_worlds = []
+display_name_prefix = "Guest"
+
+# External signed-JWT authentication (ADR-026 section 8). Only read while
+# "external" is in auth.methods. Keys come from a static JWKS file on disk and
+# are never fetched over HTTP, so the whole path can be exercised offline.
+# issuer must differ from the internal access-token issuer, otherwise a token
+# this server minted would be accepted back through /v1/auth/external.
+[auth.external]
+issuer = ""
+audience = ""
+# "none" is never accepted.
+algorithm = "EdDSA"
+jwks_path = ""
+leeway_seconds = 60
+role_names = []
+
+[rate_limit]
+normal_per_sec = 100
+custom_per_sec = 10
+persistent_threshold = 5
+max_buckets = 10000
+# 10 attempts/minute exceeds ordinary typos but is far below password-spraying volume.
+login_per_ip_per_minute = 10
+# 300 seconds slows attackers to at most 1/30 while keeping the wait tolerable for users.
+login_ip_block_seconds = 300
+# 10000 login-IP buckets applies the same memory bound as the existing rate limiter.
+login_ip_max_buckets = 10000
+realtime_ticket_per_interval = 10
+
+[realtime]
+heartbeat_interval_seconds = 20
+connection_timeout_seconds = 60
+max_message_bytes = 65536
+outbound_queue_capacity = 256
+per_connection_capacity = 256
+# Expired resume bindings are pruned before the 60-second grace can retain them.
+resume_prune_interval_seconds = 15
+# Realtime ticket verification. With `false` (the default), the server uses the
+# PostgreSQL-backed, single-use opaque ticket verifier. Set this to `true` ONLY
+# on a loopback-bound local development server: it accepts any non-empty
+# `realtime_ticket` and fabricates a user identity. Stub mode is not
+# authentication and must never be exposed on a public network (N-1).
+allow_stub_ticket = false
+
+[world]
+default_capacity = 100
+server_tick_hz = 10
+component_updates_per_sec = 10
+resume_grace_seconds = 60
+checkpoint_interval_secs = 300
+checkpoint_interval_ticks = 300
+# Staged generation codec only; legacy adapter remains capped at 8 MiB.
+checkpoint_chunk_bytes = 262144
+# Generation writes remain off until independent PG/rollout acceptance.
+# Enabling requires an approved DB deployment identity and a stable absolute
+# lock path on the designated singleton host. Never use rolling overlap.
+checkpoint_generation_enabled = false
+checkpoint_writer_lock = ""
+checkpoint_deployment = ""
+checkpoint_max_serialized_bytes = 8388608
+history_capacity = 256
+max_speed = 50.0
+max_acceleration = 10.0
+# Enforces max_speed/max_acceleration on UpdateTransform (ADR-024). Set to
+# false only for use cases whose own logic (e.g. an external physics engine)
+# already validates kinematics; ownership, revision, the per-tick teleport
+# distance limit, and numeric finiteness are enforced either way. Restarting
+# the server is required for a change to take effect.
+speed_acceleration_check_enabled = true
+mailbox_control_capacity = 64 # Join/leave bursts are uncommon, so reserve a smaller bounded lane.
+mailbox_transform_capacity = 256 # Match realtime.outbound_queue_capacity for transform bursts.
+mailbox_entity_capacity = 256 # Keep entity command headroom aligned with transform input.
+
+[identity]
+csv_max_bytes = 1048576
+csv_max_rows = 1000
+
+[retention]
+realtime_ticket_interval_seconds = 60
+idempotency_interval_seconds = 3600
+drain_budget_seconds = 20
+restart_backoff_seconds = 5
+extension_outbox_days = 1
+source_ip_days = 365
+
+[extensions]
+max_concurrency = 16
+delivery_timeout_seconds = 5
+max_attempts = 5
+backoff_min_seconds = 1
+backoff_max_seconds = 30
+circuit_failure_threshold = 5
+circuit_open_seconds = 30
+dlq_retention_days = 7
+# ADR-025: per-request timeout for the synchronous state-confirmation-before
+# validation hook. Distinct from delivery_timeout_seconds above (async webhook
+# delivery, 5s): this sits on a user-facing request path and must fail closed
+# quickly. Timeout, non-2xx, connection failure and unparsable responses all
+# reject the command (fail closed, not fail open). 500ms is an unmeasured
+# starting default, not a load-tested figure; tune it for your extension's
+# real latency. Keep it well below [realtime] heartbeat_interval_seconds
+# (in milliseconds) — this call runs inline in that connection's own
+# heartbeat loop, so an overly large value here delays that connection's
+# own heartbeat handling (ADR-025 "Heartbeat/接続timeoutとの関係").
+pre_commit_validation_timeout_ms = 500
+# Process-wide maximum number of concurrent pre-commit validation requests.
+pre_commit_validation_max_concurrency = 16
+# Optional PEM or DER CA file for the pre-commit HTTPS hook only. Empty keeps
+# the platform trust store and normal certificate verification unchanged.
+pre_commit_additional_ca_path = ""
+# Test-only: allows the pre-commit validation hook to reach loopback/private
+# endpoints, bypassing the same egress policy that also guards webhook
+# delivery. Must stay false in production.
+allow_loopback_endpoints = false
+
+[interest]
+cell_size = 20.0
+near_radius = 30.0
+unsubscribe_radius = 35.0
+
+[observability]
+log_format = "json"
+log_level = "info"
+# Audit-event retention in days (1..3650); operator script performs bounded purge, not runtime.
+audit_retention_days = 365

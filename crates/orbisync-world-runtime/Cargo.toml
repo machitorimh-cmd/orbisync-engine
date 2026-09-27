@@ -1,0 +1,29 @@
+[package]
+name = "orbisync-world-runtime"
+description = "OrbiSync instance runtime: transient state, commands and lifecycle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Dependency rule (`repo-crate-conventions.md` §3.2): `world-runtime` depends on `domain` and `application`. It must not depend on `interest` or `realtime` (§8 condition 4).
+[features]
+test-support = []
+
+[dependencies]
+sha2 = { workspace = true }
+async-trait = { workspace = true }
+orbisync-application = { workspace = true }
+orbisync-domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

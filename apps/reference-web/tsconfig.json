@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "dist",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bufbuild/protobuf": [
+        "node_modules/@bufbuild/protobuf/dist/esm/index.d.ts"
+      ],
+      "@bufbuild/protobuf/*": [
+        "node_modules/@bufbuild/protobuf/dist/esm/*/index.d.ts"
+      ]
+    },
+    "lib": ["ES2022", "DOM"],
+    "types": []
+  },
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules"]
+}

@@ -1,0 +1,1678 @@
+openapi: 3.1.0
+info:
+  title: OrbiSync REST API
+  version: 1.0.0-draft
+  description: 'Implemented subset of the OrbiSync REST contract. This document is
+    the source of truth for what the server actually serves and is machine-checked
+    against the real Axum router (scripts/validate_openapi_routes.py). Design work
+    for not-yet-wired operations is preserved in openapi/orbisync-v1-planned.yaml
+    and is not routable. The file declares 32 paths / 41 operations, including
+    the ADR-007 extension command endpoint, after
+    rest-users-auth wired GET /v1/auth/me, PATCH /v1/users/{user_id},
+    POST /v1/users/{user_id}/disable, POST /v1/users/{user_id}/enable,
+    POST /v1/users/import, and POST /v1/auth/logout; rest-instances wired
+    GET /v1/instances, GET /v1/instances/{instance_id},
+    POST /v1/instances/{instance_id}/start,
+    POST /v1/instances/{instance_id}/stop,
+    POST /v1/instances/{instance_id}/kick/{user_id}, and
+    GET /v1/instances/{instance_id}/members; and rest-worlds-roles wired
+    GET /v1/worlds, GET /v1/worlds/{world_id}, PATCH
+    /v1/worlds/{world_id}, POST /v1/worlds/{world_id}/archive, and PATCH
+    /v1/roles/{role_id}. Together these integration branches moved all 17
+    operations from the planned file to the implemented contract; the prior
+    implemented contract was 18 paths / 22 operations, and the original
+    original 30-path / 39-operation design is fully implemented, and the
+    protected operational diagnostics endpoint was added afterward.
+
+    '
+servers:
+- url: https://localhost
+security:
+- bearerAuth: []
+paths:
+  /v1/extensions/commands:
+    post:
+      operationId: executeExtensionCommand
+      summary: Execute a scoped extension read command
+      description: >-
+        Uses an extension service credential, never a user JWT. entity.get requires
+        commands:entity:read and instances:<instance_id> in both issued and current
+        manifest scopes, plus the current command capability. The instance grant
+        allows service reads of entities in that instance, including restricted
+        visibility. audit.get requires commands:audit:read and exposes the existing
+        secret-free audit projection. Unknown or administrative commands are rejected.
+      security:
+      - extensionBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+                additionalProperties: false
+                required: [command, instance_id, entity_id]
+                properties:
+                  command: {const: entity.get}
+                  instance_id: {$ref: '#/components/schemas/UuidV7'}
+                  entity_id: {$ref: '#/components/schemas/UuidV7'}
+              - type: object
+                additionalProperties: false
+                required: [command, event_id]
+                properties:
+                  command: {const: audit.get}
+                  event_id: {$ref: '#/components/schemas/UuidV7'}
+      responses:
+        '200':
+          description: Authorized read result. Inactive or missing entities return 404.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result]
+                additionalProperties: false
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+                    description: >-
+                      entity.get returns entity_id, instance_id, kind, owner_user_id,
+                      decimal-string revision, transform (nullable), and components
+                      (component name to byte array). audit.get returns audit_id,
+                      timestamp, actor_type, actor_id, action, resource_type,
+                      resource_id, result, error_code, request_id, and details.
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/auth/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/methods:
+    get:
+      operationId: listAuthMethods
+      summary: Authentication methods this deployment accepts
+      description: |
+        Reachable without authentication, because a client has to know which
+        call to make before it can authenticate. Returns method identifiers
+        only; issuer URLs, key locations and every other setting stay
+        server-side.
+      security: []
+      responses:
+        '200':
+          description: The accepted methods
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthMethodsResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/guest:
+    post:
+      operationId: authenticateGuest
+      summary: Join anonymously
+      description: |
+        Issues a temporary subject with a server-generated display name. The
+        request carries no input: the user id, the display name and the granted
+        roles are all decided by the server, and the body declares no field for
+        any of them. Answers 403 AUTH_METHOD_DISABLED when guest participation
+        is not enabled, identically whether it was switched off or never
+        configured.
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuestRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/name:
+    post:
+      operationId: authenticateNameOnly
+      summary: Join with a display name only
+      description: |
+        Issues a temporary subject carrying the supplied display name. The name
+        is a label, never an authentication factor: two visitors may choose the
+        same one and remain distinct subjects.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NameOnlyRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/external:
+    post:
+      operationId: authenticateExternal
+      summary: Authenticate with a token from a configured issuer
+      description: |
+        Verifies a signed token and resolves it to an internal user by its
+        issuer and subject pair. Self-asserted claims such as email or role are
+        never read, and a new pair creates a new user rather than attaching to
+        an existing local account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExternalAuthRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Rotated token pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/realtime/tickets:
+    post:
+      operationId: createRealtimeTicket
+      responses:
+        '200':
+          description: Single-use realtime ticket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketResponse'
+        '429':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/change-password:
+    post:
+      operationId: changePassword
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: Password changed; all sessions for the user, including the caller's, are revoked
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users:
+    post:
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - login_id
+              - display_name
+              properties:
+                login_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                display_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        '201':
+          description: Created user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+            application/vnd.orbisync.user-credential+json:
+              schema:
+                $ref: '#/components/schemas/CreatedUserCredential'
+        default:
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: listUsers
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: User page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/worlds:
+    post:
+      operationId: createWorld
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorldRequest'
+      responses:
+        '201':
+          description: World created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/World'
+        default:
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: listWorlds
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: World page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorldPage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/worlds/{world_id}:
+    parameters:
+    - $ref: '#/components/parameters/WorldId'
+    get:
+      operationId: getWorld
+      responses:
+        '200':
+          description: World
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/World'
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: updateWorld
+      parameters:
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorldRequest'
+      responses:
+        '200':
+          description: World updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/World'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/worlds/{world_id}/archive:
+    post:
+      operationId: archiveWorld
+      parameters:
+      - $ref: '#/components/parameters/WorldId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: World archived (idempotent; archiving an already-archived world returns 200 without a state change)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/World'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/instances:
+    post:
+      operationId: createInstance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInstanceRequest'
+      responses:
+        '201':
+          description: Created instance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        default:
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: listInstances
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Instance page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstancePage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/instances/{instance_id}:
+    parameters:
+    - $ref: '#/components/parameters/InstanceId'
+    get:
+      operationId: getInstance
+      responses:
+        '200':
+          description: Instance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/instances/{instance_id}/start:
+    post:
+      operationId: startInstance
+      parameters:
+      - $ref: '#/components/parameters/InstanceId'
+      responses:
+        '202':
+          description: Start accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/instances/{instance_id}/stop:
+    post:
+      operationId: stopInstance
+      parameters:
+      - $ref: '#/components/parameters/InstanceId'
+      responses:
+        '202':
+          description: Stop accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/instances/{instance_id}/kick/{user_id}:
+    post:
+      operationId: kickInstanceMember
+      parameters:
+      - $ref: '#/components/parameters/InstanceId'
+      - $ref: '#/components/parameters/UserId'
+      responses:
+        '204':
+          description: Member kicked
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/instances/{instance_id}/members:
+    get:
+      operationId: listInstanceMembers
+      parameters:
+      - $ref: '#/components/parameters/InstanceId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Member page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceMemberPage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/roles:
+    post:
+      operationId: createRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoleRequest'
+      responses:
+        '201':
+          description: Role created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        default:
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: listRoles
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Role page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RolePage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/{user_id}/roles:
+    put:
+      operationId: replaceUserRoles
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceUserRolesRequest'
+      responses:
+        '200':
+          description: Role assignments replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRoleAssignment'
+        default:
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: getUserRoles
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: User roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRoleAssignment'
+        default:
+          $ref: '#/components/responses/Error'
+  /health/live:
+    get:
+      operationId: liveness
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+  /health/ready:
+    get:
+      operationId: readiness
+      security: []
+      responses:
+        '200':
+          description: Process can serve traffic
+        '503':
+          $ref: '#/components/responses/Error'
+  /version:
+    get:
+      operationId: version
+      security: []
+      responses:
+        '200':
+          description: Build and protocol version
+  /metrics:
+    get:
+      operationId: metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus-compatible metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+  /v1/users/{user_id}:
+    parameters:
+    - $ref: '#/components/parameters/UserId'
+    get:
+      operationId: getUser
+      responses:
+        '200':
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: updateUser
+      parameters:
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              properties:
+                display_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/{user_id}/reset-password:
+    post:
+      operationId: resetUserPassword
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 'Reset initiated. On first 202 the body contains temporary_password; on idempotent replay with same Idempotency-Key the body contains only must_change_password (temporary_password is omitted and never persisted, AUD-C1).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryPassword'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/{user_id}/disable:
+    post:
+      operationId: disableUser
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: User disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/{user_id}/enable:
+    post:
+      operationId: enableUser
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: User enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/import:
+    post:
+      operationId: importUsers
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              maxLength: 1048576
+      responses:
+        '202':
+          description: Import accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserImportResult'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      responses:
+        '204':
+          description: Session revoked
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/administration-access:
+    get:
+      operationId: checkAdministrationAccess
+      description: Checks the existing admin.roles.assign permission for local operator configuration. The local launcher also requires its launch capability and same-origin requests.
+      responses:
+        '204':
+          description: Active session has administration permission
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/me:
+    get:
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: Current authenticated subject
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/roles/{role_id}:
+    parameters:
+    - $ref: '#/components/parameters/RoleId'
+    get:
+      operationId: getRole
+      responses:
+        '200':
+          description: Role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: updateRole
+      parameters:
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoleRequest'
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteRole
+      parameters:
+      - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: Role deleted
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/audit-events:
+    get:
+      operationId: listAuditEvents
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Audit event page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventPage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/audit-events/{event_id}:
+    get:
+      operationId: getAuditEvent
+      parameters:
+      - $ref: '#/components/parameters/AuditEventId'
+      responses:
+        '200':
+          description: Audit event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEvent'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/admin/diagnostics:
+    get:
+      operationId: getOperationalDiagnostics
+      description: >-
+        Read-only, process-local and durable operational summary. Requires the
+        admin.diagnostics.read permission. This endpoint is intentionally not
+        part of public liveness or readiness responses.
+      responses:
+        '200':
+          description: Protected operational diagnostics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationalDiagnostics'
+        default:
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    extensionBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque extension service token
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        $ref: '#/components/schemas/UuidV7'
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UuidV7'
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    RoleId:
+      name: role_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UuidV7'
+    WorldId:
+      name: world_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UuidV7'
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: ^"[0-9]+"$
+    AuditEventId:
+      name: event_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UuidV7'
+    InstanceId:
+      name: instance_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UuidV7'
+  responses:
+    Error:
+      description: Stable error envelope; codes are registered in errors.yaml.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    UuidV7:
+      type: string
+      format: uuid
+      pattern: ^[0-9a-fA-F-]{36}$
+    AuthMethodsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - methods
+      properties:
+        methods:
+          type: array
+          items:
+            type: string
+            enum: [local, guest, name_only, external]
+    GuestRequest:
+      type: object
+      # No properties at all, and none may be added. A body claiming a role,
+      # user id or owner is refused rather than ignored, so it cannot be read
+      # as though the claim had been honoured.
+      additionalProperties: false
+      properties: {}
+    NameOnlyRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - display_name
+      properties:
+        display_name:
+          type: string
+          description: |
+            A label only. It is neither an authentication factor nor a
+            permission, and it is not used to derive the subject's identifier.
+          minLength: 1
+          maxLength: 128
+    ExternalAuthRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - token
+      properties:
+        token:
+          type: string
+          description: Signed token issued by the configured provider.
+          minLength: 1
+          maxLength: 8192
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - login_id
+      - password
+      properties:
+        login_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - access_token
+      - refresh_token
+      - token_type
+      - expires_in
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          minimum: 1
+    TokenPair:
+      type: object
+      additionalProperties: false
+      required:
+      - access_token
+      - refresh_token
+      - token_type
+      - expires_in
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          minimum: 1
+    TicketResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - realtime_ticket
+      - expires_in
+      properties:
+        realtime_ticket:
+          type: string
+        expires_in:
+          type: integer
+          minimum: 1
+    User:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - login_id
+      - display_name
+      - enabled
+      - revision
+      properties:
+        id:
+          $ref: '#/components/schemas/UuidV7'
+        login_id:
+          type: string
+        display_name:
+          type: string
+        enabled:
+          type: boolean
+        revision:
+          type: integer
+          minimum: 1
+    CreatedUserCredential:
+      type: object
+      additionalProperties: false
+      required:
+      - user
+      - temporary_password
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        temporary_password:
+          type: string
+          minLength: 27
+          maxLength: 27
+    TemporaryPassword:
+      type: object
+      additionalProperties: false
+      required:
+      - must_change_password
+      properties:
+        temporary_password:
+          type: string
+          minLength: 27
+          maxLength: 27
+          description: 'Present only on first 202; omitted on idempotent replay and never persisted (AUD-C1).'
+        must_change_password:
+          type: boolean
+          const: true
+    UserImportRowResult:
+      type: object
+      additionalProperties: false
+      required:
+      - row
+      - status
+      properties:
+        row:
+          type: integer
+          minimum: 2
+          maximum: 1001
+        status:
+          type: string
+          enum:
+          - created
+          - failed
+        user:
+          $ref: '#/components/schemas/User'
+        temporary_password:
+          type: string
+          minLength: 27
+          maxLength: 27
+        error_code:
+          type: string
+          pattern: ^[A-Z][A-Z0-9_]+$
+        message:
+          type: string
+    UserImportResult:
+      type: object
+      additionalProperties: false
+      required:
+      - total
+      - succeeded
+      - failed
+      - results
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          maximum: 1000
+        succeeded:
+          type: integer
+          minimum: 0
+          maximum: 1000
+        failed:
+          type: integer
+          minimum: 0
+          maximum: 1000
+        results:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/UserImportRowResult'
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - current_password
+      - new_password
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          maxLength: 128
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 128
+    CreateWorldRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - capacity
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type:
+          - string
+          - 'null'
+          maxLength: 1024
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        default_spawn:
+          type: object
+          additionalProperties: false
+          properties:
+            position:
+              type: object
+              required:
+              - x
+              - y
+              - z
+              properties:
+                x:
+                  type: number
+                y:
+                  type: number
+                z:
+                  type: number
+            rotation:
+              type: object
+              required:
+              - x
+              - y
+              - z
+              - w
+              properties:
+                x:
+                  type: number
+                y:
+                  type: number
+                z:
+                  type: number
+                w:
+                  type: number
+            scale:
+              type: object
+              required:
+              - x
+              - y
+              - z
+              properties:
+                x:
+                  type: number
+                y:
+                  type: number
+                z:
+                  type: number
+    CreateInstanceRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - world_id
+      properties:
+        world_id:
+          $ref: '#/components/schemas/UuidV7'
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+    Role:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - permissions
+      - revision
+      properties:
+        id:
+          $ref: '#/components/schemas/UuidV7'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type:
+          - string
+          - 'null'
+          maxLength: 1024
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            pattern: ^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$
+        revision:
+          type: integer
+          minimum: 1
+    CreateRoleRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - permissions
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type:
+          - string
+          - 'null'
+          maxLength: 1024
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            pattern: ^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$
+    UpdateRoleRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type:
+          - string
+          - 'null'
+          maxLength: 1024
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            pattern: ^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$
+    ReplaceUserRolesRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - role_ids
+      properties:
+        role_ids:
+          type: array
+          uniqueItems: true
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/UuidV7'
+    UserRoleAssignment:
+      type: object
+      additionalProperties: false
+      required:
+      - user_id
+      - role_ids
+      properties:
+        user_id:
+          $ref: '#/components/schemas/UuidV7'
+        role_ids:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/UuidV7'
+    World:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - revision
+      - status
+      properties:
+        id:
+          $ref: '#/components/schemas/UuidV7'
+        name:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum:
+          - active
+          - archived
+    UpdateWorldRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type:
+          - string
+          - 'null'
+          maxLength: 1024
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        default_spawn:
+          type: object
+          additionalProperties: false
+          properties:
+            position:
+              type: object
+              required:
+              - x
+              - y
+              - z
+              properties:
+                x:
+                  type: number
+                y:
+                  type: number
+                z:
+                  type: number
+            rotation:
+              type: object
+              required:
+              - x
+              - y
+              - z
+              - w
+              properties:
+                x:
+                  type: number
+                y:
+                  type: number
+                z:
+                  type: number
+                w:
+                  type: number
+            scale:
+              type: object
+              required:
+              - x
+              - y
+              - z
+              properties:
+                x:
+                  type: number
+                y:
+                  type: number
+                z:
+                  type: number
+    WorldPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/World'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    Instance:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - world_id
+      - status
+      - revision
+      properties:
+        id:
+          $ref: '#/components/schemas/UuidV7'
+        world_id:
+          $ref: '#/components/schemas/UuidV7'
+        status:
+          type: string
+          enum:
+          - created
+          - running
+          - stopping
+          - stopped
+        revision:
+          type: integer
+          minimum: 1
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+          - code
+          - message
+          - request_id
+          properties:
+            code:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]+$
+            message:
+              type: string
+            request_id:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+    UserPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    RolePage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    InstancePage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Instance'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    InstanceMemberPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - user_id
+            properties:
+              user_id:
+                $ref: '#/components/schemas/UuidV7'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+      - audit_id
+      - timestamp
+      - actor_type
+      - action
+      - resource_type
+      - result
+      - request_id
+      - details
+      properties:
+        audit_id:
+          $ref: '#/components/schemas/UuidV7'
+        timestamp:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+          enum:
+          - user
+          - admin
+          - system
+        actor_id:
+          type:
+          - string
+          - 'null'
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type:
+          - string
+          - 'null'
+        result:
+          type: string
+          enum:
+          - success
+          - failure
+        error_code:
+          type:
+          - string
+          - 'null'
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+    AuditEventPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    OperationalDiagnostics:
+      type: object
+      additionalProperties: false
+      required:
+      - collected_at
+      - checkpoint
+      - queues
+      - active_connections
+      - rate_limit_rejections_total
+      - extensions
+      - retention
+      properties:
+        collected_at:
+          type: string
+          format: date-time
+        checkpoint:
+          type: object
+          additionalProperties: false
+          required:
+          - latest_at
+          - save_failures_total
+          - restore_failures_total
+          - save_rejected_too_large_total
+          - restore_rejected_too_large_total
+          properties:
+            latest_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+            save_failures_total:
+              type: integer
+              minimum: 0
+            restore_failures_total:
+              type: integer
+              minimum: 0
+            save_rejected_too_large_total:
+              type: integer
+              minimum: 0
+            restore_rejected_too_large_total:
+              type: integer
+              minimum: 0
+        queues:
+          type: object
+          additionalProperties: false
+          required:
+          - control
+          - transform
+          - entity
+          - outbound
+          properties:
+            control:
+              $ref: '#/components/schemas/MailboxQueueDiagnostics'
+            transform:
+              $ref: '#/components/schemas/MailboxQueueDiagnostics'
+            entity:
+              $ref: '#/components/schemas/MailboxQueueDiagnostics'
+            outbound:
+              $ref: '#/components/schemas/OutboundQueueDiagnostics'
+        active_connections:
+          type: integer
+          minimum: 0
+        rate_limit_rejections_total:
+          type: object
+          additionalProperties: false
+          required: [connection, user, ip, password_hash, instance]
+          properties:
+            connection: {type: integer, minimum: 0}
+            user: {type: integer, minimum: 0}
+            ip: {type: integer, minimum: 0}
+            password_hash: {type: integer, minimum: 0}
+            instance: {type: integer, minimum: 0}
+        extensions:
+          type: object
+          additionalProperties: false
+          required: [outbox_pending, deliveries_in_flight, dead_letters]
+          properties:
+            outbox_pending: {type: integer, minimum: 0}
+            deliveries_in_flight: {type: integer, minimum: 0}
+            dead_letters: {type: integer, minimum: 0}
+        retention:
+          type: object
+          additionalProperties: false
+          required:
+          - realtime_tickets_last_success_at
+          - idempotency_records_last_success_at
+          - audit_source_ips_last_success_at
+          - extension_outbox_last_success_at
+          properties:
+            realtime_tickets_last_success_at:
+              type: [string, 'null']
+              format: date-time
+            idempotency_records_last_success_at:
+              type: [string, 'null']
+              format: date-time
+            audit_source_ips_last_success_at:
+              type: [string, 'null']
+              format: date-time
+            extension_outbox_last_success_at:
+              type: [string, 'null']
+              format: date-time
+    MailboxQueueDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [last_observed_depth, capacity_per_instance]
+      properties:
+        last_observed_depth: {type: integer, minimum: 0}
+        capacity_per_instance: {type: integer, minimum: 1}
+    OutboundQueueDiagnostics:
+      type: object
+      additionalProperties: false
+      required:
+      - last_observed_depth
+      - depth_high_water
+      - capacity_per_connection
+      - last_observed_bytes
+      - bytes_high_water
+      properties:
+        last_observed_depth: {type: integer, minimum: 0}
+        depth_high_water: {type: integer, minimum: 0}
+        capacity_per_connection: {type: integer, minimum: 1}
+        last_observed_bytes: {type: integer, minimum: 0}
+        bytes_high_water: {type: integer, minimum: 0}

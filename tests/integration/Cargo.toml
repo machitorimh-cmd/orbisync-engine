@@ -1,0 +1,62 @@
+[package]
+name = "orbisync-integration-tests"
+description = "OrbiSync workspace level integration tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# This package contains no library or binary target: it only holds the
+# workspace level integration tests described in `test-and-ci.md` §1.2.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+hmac = { workspace = true }
+http-body-util = { workspace = true }
+pollster = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+orbisync-application = { workspace = true }
+orbisync-config = { workspace = true }
+orbisync-extensions = { workspace = true }
+orbisync-domain = { workspace = true }
+orbisync-identity = { workspace = true }
+orbisync-interest = { workspace = true }
+orbisync-observability = { workspace = true }
+orbisync-protocol = { workspace = true }
+orbisync-realtime = { workspace = true }
+orbisync-server = { workspace = true }
+orbisync-storage-postgres = { workspace = true }
+orbisync-testkit = { workspace = true }
+orbisync-transport-http = { workspace = true }
+orbisync-world-directory = { workspace = true }
+orbisync-world-runtime = { workspace = true, features = ["test-support"] }
+argon2 = { version = "0.5.3", default-features = false, features = ["std", "password-hash"] }
+futures-util = { version = "0.3.33", default-features = false, features = ["sink", "std"] }
+jsonwebtoken = { workspace = true }
+password-hash = { version = "0.5.0", default-features = false }
+prost = { workspace = true }
+prost-types = { workspace = true }
+rcgen = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = "0.29"
+tower = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

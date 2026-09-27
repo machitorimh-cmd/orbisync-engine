@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@bufbuild/protobuf": [
+        "node_modules/@bufbuild/protobuf/dist/esm/index.js"
+      ],
+      "@bufbuild/protobuf/*": [
+        "node_modules/@bufbuild/protobuf/dist/esm/*/index.js"
+      ]
+    }
+  }
+}

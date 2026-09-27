@@ -1,0 +1,23 @@
+[package]
+name = "orbisync-domain"
+description = "OrbiSync pure domain types, identifiers, clock abstraction and domain errors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Dependency rule (`repo-crate-conventions.md` §3.2): `domain` depends on no
+# other workspace crate and on no framework crate (Axum / SQLx / Tokio /
+# protocol generated code). Only pure value libraries are allowed here.
+[dependencies]
+thiserror = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+version: v2
+plugins:
+  - local: protoc-gen-prost
+    out: generated/rust
+  - local: protoc-gen-es
+    out: sdk/typescript/src/generated
+    opt:
+      - target=ts

@@ -1,0 +1,612 @@
+:root {
+    font-family:
+        "Yu Gothic UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    color: #173b40;
+    font-synthesis: none;
+    background: #badbdc;
+    font-size: 14px;
+}
+* {
+    box-sizing: border-box;
+}
+body {
+    margin: 0;
+    overflow: hidden;
+}
+button,
+input,
+a {
+    -webkit-tap-highlight-color: transparent;
+}
+button {
+    font: inherit;
+    cursor: pointer;
+    border: 0;
+    transition:
+        background 0.18s,
+        transform 0.18s;
+}
+button:hover {
+    filter: brightness(1.06);
+}
+button:active {
+    transform: translateY(1px);
+}
+button:focus-visible,
+a:focus-visible {
+    outline: 3px solid #dc971d;
+    outline-offset: 4px;
+}
+button:disabled {
+    cursor: wait;
+    opacity: 0.55;
+}
+[hidden] {
+    display: none !important;
+}
+#world {
+    position: fixed;
+    inset: 0;
+}
+#world canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+}
+.topbar {
+    position: fixed;
+    z-index: 2;
+    top: 28px;
+    left: 38px;
+    right: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.brand {
+    display: flex;
+    gap: 12px;
+    text-decoration: none;
+    color: #163c40;
+    align-items: center;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: -0.7px;
+}
+.brand-icon {
+    font-size: 35px;
+}
+.brand small {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 3px;
+    margin-top: 2px;
+    font-weight: 600;
+}
+.top-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+.badge,
+.icon-button {
+    border-radius: 30px;
+    padding: 10px 17px;
+    font-size: 12px;
+    background: #f6fcf6bb;
+    backdrop-filter: blur(12px);
+}
+.badge:before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 8px;
+    background: #328e78;
+    border-radius: 50%;
+}
+.panel {
+    background: linear-gradient(135deg, #fcfff5f5, #f5fbf0e8);
+    border: 1px solid #fff9;
+    box-shadow: 0 18px 70px #18434118;
+    backdrop-filter: blur(18px);
+    border-radius: 24px;
+}
+.welcome {
+    position: absolute;
+    left: 5vw;
+    top: 50%;
+    transform: translateY(-47%);
+    width: 365px;
+    padding: 34px;
+}
+.eyebrow {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    color: #608177;
+    display: block;
+}
+.welcome h1 {
+    font-family: Georgia, "Yu Mincho", serif;
+    font-size: 48px;
+    line-height: 1.5;
+    letter-spacing: 3px;
+    font-weight: 500;
+    margin: 17px 0;
+}
+.welcome p,
+dialog p,
+.finish p {
+    font-size: 13px;
+    line-height: 2;
+    color: #617571;
+}
+.steps {
+    display: grid;
+    gap: 12px;
+    margin: 26px 0;
+    font-size: 12px;
+}
+.steps b {
+    font-size: 10px;
+    color: #8b9d81;
+    margin-right: 12px;
+}
+.primary {
+    background: #204f45;
+    color: #fffef1;
+    border-radius: 12px;
+    padding: 15px 20px;
+    font-weight: 700;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.secondary {
+    background: transparent;
+    color: #386257;
+    border: 1px solid #a9bfb1;
+    border-radius: 12px;
+    padding: 12px;
+    width: 100%;
+    margin-top: 10px;
+    font-size: 12px;
+}
+.note {
+    font-size: 10px !important;
+    color: #7b8b7e !important;
+    line-height: 1.8 !important;
+}
+.welcome > .note {
+    display: block;
+    text-align: center;
+    margin-top: 17px;
+}
+.location {
+    position: fixed;
+    bottom: 42px;
+    left: 40px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+.location small {
+    display: block;
+    margin: 9px 0 0 13px;
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 1px;
+}
+.location-dot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #437567;
+    margin-right: 8px;
+}
+.mission {
+    position: absolute;
+    top: 110px;
+    left: 35px;
+    width: 300px;
+    padding: 23px;
+}
+.mission-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.mission h2 {
+    font-size: 15px;
+    margin: 15px 0;
+}
+.mission strong {
+    font-size: 25px;
+    color: #ba812b;
+}
+.mission strong span {
+    font-size: 13px;
+    color: #8a9988;
+}
+.progress {
+    height: 5px;
+    background: #dfe8d6;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.progress i {
+    display: block;
+    height: 100%;
+    background: #d3a047;
+    width: 0;
+    transition: width 0.4s;
+}
+.mission p {
+    font-size: 11px;
+    color: #6b7d70;
+    line-height: 1.7;
+}
+.mission-bottom {
+    display: flex;
+    justify-content: space-between;
+    border-top: 1px solid #dfe7d9;
+    padding-top: 12px;
+    font-size: 11px;
+    color: #648071;
+}
+#timer {
+    font-variant-numeric: tabular-nums;
+}
+#toast {
+    position: fixed;
+    top: 104px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-12px);
+    padding: 12px 24px;
+    border-radius: 30px;
+    background: #1c5047eb;
+    color: #fff8d9;
+    opacity: 0;
+    transition: 0.25s;
+    pointer-events: none;
+    text-align: center;
+    font-size: 13px;
+}
+#toast.visible {
+    opacity: 1;
+    transform: translateX(-50%);
+}
+.controls {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 13px 20px;
+    border-radius: 14px;
+    background: #fcfff2df;
+    white-space: nowrap;
+    font-size: 10px;
+    color: #5b7468;
+}
+.controls kbd {
+    font-family: inherit;
+    font-size: 10px;
+    border: 1px solid #cad7c4;
+    border-radius: 4px;
+    padding: 2px 5px;
+    margin-right: 3px;
+    background: #fffdf6;
+}
+.controls button {
+    background: transparent;
+    color: #6c7e68;
+    font-size: 10px;
+    padding: 4px;
+}
+#interaction {
+    position: fixed;
+    bottom: 100px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+#interaction button {
+    box-shadow: 0 8px 40px #214d4566;
+    white-space: nowrap;
+}
+.finish {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 400px;
+    padding: 32px;
+    text-align: center;
+}
+.finish-star {
+    display: block;
+    font-size: 50px;
+    color: #cd9c3b;
+    margin-bottom: 10px;
+}
+.finish h2 {
+    font-family: "Yu Mincho", serif;
+    font-size: 25px;
+}
+.finish .primary {
+    justify-content: center;
+}
+.finish #result {
+    margin: 18px;
+    color: #9a7938;
+    font-size: 12px;
+}
+dialog {
+    border: 1px solid #fff;
+    background: #f8fbf1;
+    color: #173b40;
+    border-radius: 24px;
+    padding: 32px;
+    width: min(440px, calc(100% - 30px));
+    max-height: 90dvh;
+    box-shadow: 0 24px 100px #193f4a33;
+}
+dialog::backdrop {
+    background: #10333866;
+    backdrop-filter: blur(8px);
+}
+dialog h2 {
+    font-size: 24px;
+    margin: 14px 0;
+}
+dialog .close {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    background: transparent;
+    font-size: 26px;
+    color: #718373;
+}
+dialog label {
+    display: block;
+    font-size: 12px;
+    margin: 14px 0;
+}
+dialog input {
+    display: block;
+    width: 100%;
+    border: 1px solid #c2d0bf;
+    border-radius: 8px;
+    background: #fffef9;
+    padding: 12px;
+    margin-top: 6px;
+    font: inherit;
+    color: #234a41;
+}
+dialog dt {
+    font-weight: 700;
+    font-size: 12px;
+    margin-top: 16px;
+}
+dialog dd {
+    margin: 6px 0;
+    color: #6a7b70;
+    font-size: 12px;
+}
+#connection-error {
+    color: #a34736;
+    font-size: 12px;
+}
+#touch {
+    position: fixed;
+    bottom: 24px;
+    left: 20px;
+    right: 20px;
+    display: none;
+    align-items: end;
+    justify-content: space-between;
+    pointer-events: none;
+}
+#touch button {
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+    background: #f6ffeddd;
+    color: #275748;
+    width: 46px;
+    height: 46px;
+    border: 1px solid #ffffff88;
+    border-radius: 13px;
+    font-size: 20px;
+}
+.dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 46px);
+    gap: 5px;
+}
+.dpad button:first-child {
+    grid-column: 2;
+}
+.dpad button:nth-child(2) {
+    grid-column: 1;
+}
+.jump {
+    width: 78px !important;
+    font-size: 11px !important;
+}
+.fatal {
+    position: fixed;
+    inset: 25%;
+    background: #fff;
+    padding: 35px;
+    border-radius: 20px;
+    z-index: 10;
+    line-height: 2;
+}
+@media (pointer: coarse) {
+    #touch {
+        display: flex;
+    }
+    .controls {
+        display: none;
+    }
+    .location {
+        display: none;
+    }
+    #interaction {
+        bottom: 140px;
+    }
+}
+@media (max-width: 700px) {
+    .topbar {
+        top: 18px;
+        left: 20px;
+        right: 20px;
+    }
+    .brand {
+        font-size: 18px;
+    }
+    .brand small {
+        font-size: 8px;
+    }
+    .top-actions {
+        gap: 5px;
+    }
+    .badge,
+    .icon-button {
+        font-size: 10px;
+        padding: 9px;
+    }
+    .welcome {
+        left: 18px;
+        top: auto;
+        bottom: 24px;
+        transform: none;
+        width: calc(100% - 36px);
+        padding: 24px;
+    }
+    .welcome h1 {
+        font-size: 33px;
+        line-height: 1.4;
+        margin: 12px 0;
+    }
+    .welcome h1 br {
+        display: none;
+    }
+    .welcome p {
+        font-size: 11px;
+    }
+    .steps {
+        display: flex;
+        gap: 12px;
+        font-size: 9px;
+        margin: 18px 0;
+    }
+    .steps b {
+        margin-right: 4px;
+    }
+    .welcome > .note {
+        margin-top: 10px;
+    }
+    .location {
+        display: none;
+    }
+    .mission {
+        top: 86px;
+        left: 18px;
+        width: 255px;
+        padding: 17px;
+    }
+    .mission h2 {
+        font-size: 13px;
+    }
+    .mission strong {
+        font-size: 22px;
+    }
+    #toast {
+        top: auto;
+        bottom: 200px;
+        width: max-content;
+        max-width: 90vw;
+        font-size: 12px;
+    }
+    .finish {
+        width: calc(100% - 36px);
+        max-width: 400px;
+        padding: 26px;
+    }
+    .controls {
+        bottom: 20px;
+        gap: 10px;
+        font-size: 9px;
+    }
+    .controls span:nth-child(2) {
+        display: none;
+    }
+    .fatal {
+        inset: 15% 5%;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    * {
+        transition: none !important;
+    }
+}
+.welcome h1 {
+    font-size: 40px;
+    letter-spacing: 1px;
+}
+.welcome {
+    max-height: calc(100dvh - 130px);
+    overflow-y: auto;
+}
+@media (max-width: 700px) {
+    .welcome h1 {
+        font-size: 30px;
+        letter-spacing: 0;
+    }
+    .welcome h1 br {
+        display: block;
+    }
+    .welcome {
+        padding: 22px;
+    }
+    .welcome p {
+        margin: 10px 0;
+    }
+    .mission {
+        width: 235px;
+    }
+}
+@media (max-height: 600px) {
+    .welcome {
+        top: 88px;
+        bottom: 15px;
+        transform: none;
+        max-height: calc(100dvh - 103px);
+        padding: 20px;
+    }
+    .welcome h1 {
+        font-size: 27px;
+        margin: 8px 0;
+        line-height: 1.3;
+    }
+    .welcome .steps {
+        margin: 12px 0;
+        gap: 6px;
+    }
+    .welcome .note {
+        display: none;
+    }
+    .location {
+        display: none;
+    }
+}

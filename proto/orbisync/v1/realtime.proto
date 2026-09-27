@@ -1,0 +1,205 @@
+syntax = "proto3";
+
+package orbisync.v1;
+
+import "google/protobuf/struct.proto";
+
+// The public realtime contract. Field numbers 1-19 are reserved for envelope
+// headers and 20+ for payloads (ADR-004).
+message Envelope {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  string message_id = 3;
+  uint64 sequence = 4;
+  int64 sent_at_unix_ms = 5;
+  string instance_id = 6;
+
+  oneof payload {
+    ClientHello client_hello = 20;
+    ServerHello server_hello = 21;
+    JoinInstance join_instance = 22;
+    JoinAccepted join_accepted = 23;
+    Snapshot snapshot = 24;
+    StateDelta state_delta = 25;
+    TransformInput transform_input = 26;
+    EntityCommand entity_command = 27;
+    DomainEvent domain_event = 28;
+    Heartbeat heartbeat = 29;
+    HeartbeatAck heartbeat_ack = 30;
+    ResumeSession resume_session = 31;
+    ResumeAccepted resume_accepted = 32;
+    ResyncRequired resync_required = 33;
+    ErrorMessage error = 34;
+  }
+}
+
+message ClientHello {
+  uint32 supported_minor_min = 1;
+  uint32 supported_minor_max = 2;
+  string realtime_ticket = 3;
+  string client_name = 4;
+  string client_version = 5;
+  string client_type = 6;
+  repeated string supported_compressions = 7;
+  repeated string supported_features = 8;
+  string resume_token = 9;
+}
+
+message ServerHello {
+  uint32 negotiated_minor = 1;
+  string connection_id = 2;
+  int64 heartbeat_interval_ms = 3;
+  int64 server_time_unix_ms = 4;
+  string negotiated_compression = 5;
+  repeated string enabled_features = 6;
+}
+
+message JoinInstance {
+  string world_instance_id = 1;
+}
+
+message JoinAccepted {
+  string presence_id = 1;
+  uint64 instance_revision = 2;
+  // Opaque single-use reference the client presents in ResumeSession after a
+  // disconnect. Server-issued; it is not a credential and cannot authenticate a
+  // new connection on its own (mobile-resume-interest-backpressure.md §3).
+  // Empty when the server does not offer resume.
+  string resume_token = 3;
+  // Authenticated user represented by the existing UserId value.
+  string user_id = 4;
+  // Joined instance represented by the existing InstanceId value.
+  string instance_id = 5;
+  // WorldPermissions resolved by the server for this instance.
+  bool entity_spawn = 6;
+  bool entity_update_own = 7;
+  bool entity_update_any = 8;
+  // Interest-filtered entities and users visible to this joining subject.
+  repeated EntityState nearby_entities = 9;
+  repeated string nearby_presence_ids = 10;
+  repeated string nearby_user_ids = 11;
+  // Unix milliseconds from the server clock at join acceptance.
+  int64 server_time_unix_ms = 12;
+}
+
+message Snapshot {
+  string snapshot_id = 1;
+  uint32 chunk_index = 2;
+  uint32 chunk_count = 3;
+  uint64 instance_revision = 4;
+  bytes data = 5;
+}
+
+message StateDelta {
+  uint64 from_revision = 1;
+  uint64 to_revision = 2;
+  repeated EntityState entities = 3;
+}
+
+message TransformInput {
+  string entity_id = 1;
+  uint64 expected_revision = 2;
+  Transform transform = 3;
+}
+
+message EntityCommand {
+  string command_id = 1;
+  string entity_id = 2;
+  uint64 expected_revision = 3;
+  // Client: spawn/update/delete/transfer_ownership, or input with arguments { rule, intent }.
+  // Input invokes trusted world-scoped server code and confirms as a canonical
+  // update using the original command_id. Clients never supply its outcome.
+  string operation = 4;
+  // transfer_ownership requests contain exactly one string field:
+  // new_owner_id. Successful results also contain previous_owner_id.
+  google.protobuf.Struct arguments = 5;
+  // Server confirmation only: instance boundary of this committed operation.
+  // Absent on client requests and old servers. expected_revision retains its
+  // existing meanings (entity revision for spawn/update; instance for delete).
+  optional uint64 instance_revision = 6;
+}
+
+message DomainEvent {
+  string event_id = 1;
+  string event_type = 2;
+  uint64 instance_revision = 3;
+  google.protobuf.Struct data = 4;
+}
+
+message Heartbeat {
+  int64 client_time_unix_ms = 1;
+}
+
+message HeartbeatAck {
+  int64 client_time_unix_ms = 1;
+  int64 server_time_unix_ms = 2;
+}
+
+message ResumeSession {
+  string resume_token = 1;
+  uint64 last_applied_revision = 2;
+  repeated string received_message_ids = 3;
+}
+
+message ResumeAccepted {
+  string presence_id = 1;
+  uint64 current_revision = 2;
+  bool replay_follows = 3;
+  // Rotated replacement for the token just consumed. Resume tokens are single
+  // use, so the client must store this one for the next disconnect
+  // (mobile-resume-interest-backpressure.md §3). Empty when the server declines
+  // to offer a further resume.
+  string resume_token = 4;
+}
+
+message ResyncRequired {
+  string reason_code = 1;
+  uint64 current_revision = 2;
+}
+
+message ErrorMessage {
+  string code = 1;
+  string message = 2;
+  string request_message_id = 3;
+  bool retryable = 4;
+}
+
+message EntityState {
+  string entity_id = 1;
+  uint64 revision = 2;
+  Transform transform = 3;
+  google.protobuf.Struct properties = 4;
+  Velocity velocity = 5;
+  Animation animation = 6;
+  Presence presence = 7;
+}
+
+message Velocity {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+message Animation {
+  string clip = 1;
+  float time = 2;
+  float speed = 3;
+  bool looping = 4;
+}
+
+message Presence {
+  string state = 1;
+  int64 last_seen = 2;
+}
+
+message Transform {
+  // Right-handed, Y-up world coordinates. One unit is one meter.
+  float position_x = 1;
+  float position_y = 2;
+  float position_z = 3;
+  // Quaternion components are ordered x, y, z, w.
+  float rotation_x = 4;
+  float rotation_y = 5;
+  float rotation_z = 6;
+  float rotation_w = 7;
+}

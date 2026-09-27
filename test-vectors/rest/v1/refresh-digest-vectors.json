@@ -1,0 +1,15 @@
+{
+  "description": "Golden HMAC-SHA256 digests for refresh_token_digest – detects plain SHA256 fallback (GV-1)",
+  "vectors": [
+    {
+      "key": "test-only-refresh-golden-v1-TEST-NOT-PROD-32B!!",
+      "token": "fixed-refresh-token-for-golden-vector-001-TEST",
+      "digest_hex": "f622bf05d4dc44ed788f493c20ffa3c14bb3a8f4109a644a2472d74df73341d7"
+    },
+    {
+      "key": "key",
+      "token": "The quick brown fox",
+      "digest_hex": "203d1e5cedd2d18f8c5a3beff0bd9c1ebcb97097dfcb288c46b00c9227fde2c0"
+    }
+  ]
+}

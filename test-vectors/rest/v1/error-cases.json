@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {"status":409,"code":"IDEMPOTENCY_KEY_REUSED","retryable":false},
+    {"status":412,"code":"REVISION_MISMATCH","retryable":false},
+    {"status":429,"code":"RATE_LIMITED","retryable":true},
+    {"status":503,"code":"SERVICE_UNAVAILABLE","retryable":true}
+  ]
+}

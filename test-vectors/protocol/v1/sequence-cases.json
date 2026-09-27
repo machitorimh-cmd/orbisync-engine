@@ -1,0 +1,16 @@
+{
+  "description": "Each case is independent; counters do not carry between cases.",
+  "cases": [
+    {"name":"first","initial_expected_sequence":1,"received_sequence":1,"class":"control","expected":"accept","next_expected_sequence":2},
+    {"name":"duplicate_reliable","initial_expected_sequence":2,"received_sequence":1,"class":"reliable","expected":"ignore","next_expected_sequence":2},
+    {"name":"gap_reliable","initial_expected_sequence":2,"received_sequence":3,"class":"reliable","expected":"resync_required","next_expected_sequence":2},
+    {"name":"old_latest_wins","initial_expected_sequence":3,"received_sequence":2,"class":"latest-wins","expected":"discard","next_expected_sequence":3},
+    {"name":"expected_next","initial_expected_sequence":2,"received_sequence":2,"class":"control","expected":"accept","next_expected_sequence":3}
+  ],
+  "reconnect": {"new_connection":true,"initial_expected_sequence":1,"received_sequence":1,"expected":"accept"},
+  "dedup": [
+    {"name":"new_command","preexisting_payload_hash":null,"command_id":"0192d43d-a18a-7fed-8123-1123456789ab","payload_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected":"execute"},
+    {"name":"same_command_same_payload","preexisting_payload_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command_id":"0192d43d-a18a-7fed-8123-1123456789ab","payload_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected":"return_saved_result"},
+    {"name":"same_command_different_payload","preexisting_payload_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command_id":"0192d43d-a18a-7fed-8123-1123456789ab","payload_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","expected":"protocol_error"}
+  ]
+}

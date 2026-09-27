@@ -1,0 +1,19 @@
+# Build context for `deploy/docker/Dockerfile`.
+#
+# Keep `migrations/` and `proto/` in the context: the release build embeds the
+# migrations and compiles the `.proto` contract at build time.
+.git/
+.github/
+target/
+generated/
+docs/
+icon/
+reviews/
+test-vectors/
+contracts/
+openapi/
+metaverse_core_specification.md
+**/.env
+**/*.env.local
+__pycache__/
+*.py[cod]

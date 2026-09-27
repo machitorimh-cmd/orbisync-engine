@@ -1,0 +1,7 @@
+# Pinned toolchain for reproducible builds (`test-and-ci.md` §3.4).
+# Edition 2024 is required by TD-01. The minimum supported Rust version policy
+# is still open (ADR-010); `rust-version` in Cargo.toml tracks this pin.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy", "rust-docs"]
+profile = "minimal"

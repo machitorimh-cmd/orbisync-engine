@@ -1,0 +1,94 @@
+# OrbiSync development environment (`deployment-and-threat-model.md` §1.2).
+#
+# This Compose file is for local development only. It does not provide TLS,
+# backups or monitoring; a production deployment terminates TLS in an external
+# reverse proxy (ADR-009) and configures the rest separately (TD-10).
+#
+#   cp deploy/compose/.env.example .env
+#   docker compose -f deploy/compose/compose.dev.yml --env-file .env up -d
+#
+# The `postgres16` service exists so the PostgreSQL 16 support target of ADR-005
+# can be exercised locally; start it with `--profile pg16`.
+
+name: orbisync-dev
+
+services:
+  postgres:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orbisync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-orbisync}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-orbisync}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres16:
+    profiles: ["pg16"]
+    image: postgres:16.10-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orbisync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-orbisync}
+    ports:
+      - "${POSTGRES16_PORT:-5433}:5432"
+    volumes:
+      - postgres16_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-orbisync}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server:
+    # Deliberately not behind a profile: `docker compose up -d` must bring up a
+    # working system, which is what MVP condition 13 asks for. Developers who
+    # only want the database still run `up -d postgres`.
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+      ORBISYNC_TOKEN_SIGNING_KEY: ${ORBISYNC_TOKEN_SIGNING_KEY:?ORBISYNC_TOKEN_SIGNING_KEY must be set}
+      ORBISYNC_PAGINATION_HMAC_KEY: ${ORBISYNC_PAGINATION_HMAC_KEY:?ORBISYNC_PAGINATION_HMAC_KEY must be set}
+      ORBISYNC_REFRESH_TOKEN_HMAC_KEY: ${ORBISYNC_REFRESH_TOKEN_HMAC_KEY:?ORBISYNC_REFRESH_TOKEN_HMAC_KEY must be set}
+      ORBISYNC_REALTIME_TICKET_HMAC_KEY: ${ORBISYNC_REALTIME_TICKET_HMAC_KEY:?ORBISYNC_REALTIME_TICKET_HMAC_KEY must be set}
+      ORBISYNC_REALTIME_ALLOW_STUB_TICKET: ${ORBISYNC_REALTIME_ALLOW_STUB_TICKET:-false}
+      ORBISYNC_IDEMPOTENCY_HMAC_KEY: ${ORBISYNC_IDEMPOTENCY_HMAC_KEY:?ORBISYNC_IDEMPOTENCY_HMAC_KEY must be set}
+      ORBISYNC_EXTENSION_TOKEN_HMAC_KEY: ${ORBISYNC_EXTENSION_TOKEN_HMAC_KEY:?ORBISYNC_EXTENSION_TOKEN_HMAC_KEY must be set}
+      ORBISYNC_SERVER_BIND: 0.0.0.0:8080
+      # Exact local Vite origins only. Bearer tokens are used, so browser
+      # credentials remain disabled. Override this list for another UI origin.
+      ORBISYNC_CORS_ALLOWED_ORIGINS: ${ORBISYNC_CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174}
+      ORBISYNC_AUTH_REFRESH_TOKEN_TTL_SECONDS: ${ORBISYNC_AUTH_REFRESH_TOKEN_TTL_SECONDS:-2592000}
+      ORBISYNC_OBSERVABILITY_LOG_FORMAT: ${ORBISYNC_OBSERVABILITY_LOG_FORMAT:-json}
+      # Required: the server refuses to start without a 10,000 entry corpus
+      # (`PasswordPolicy::production`). Generate the development placeholder
+      # with `scripts/gen-dev-password-denylist.sh` and replace it before any
+      # real deployment.
+      ORBISYNC_PASSWORD_DENYLIST_FILE: /etc/orbisync/password-denylist.txt
+    volumes:
+      - ../../deploy/dev-password-denylist.txt:/etc/orbisync/password-denylist.txt:ro
+    ports:
+      # Keep the development server private by default. Set ORBISYNC_HOST_BIND
+      # explicitly only when a trusted LAN exposure is intentional; never use
+      # a public bind with realtime.allow_stub_ticket=true.
+      - "${ORBISYNC_HOST_BIND:-127.0.0.1}:${ORBISYNC_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres_data:
+  postgres16_data:

@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Generated protocol code. `.proto` is the source of truth and generated code is
+# never committed (ADR-004); `orbisync-protocol` generates into `OUT_DIR` and
+# `buf generate` writes here.
+/generated/
+sdk/typescript/src/generated/
+
+# Local environment and secrets — §0.1: procedures must write outside repo, gitignore is defense in depth
+.env
+*.env.local
+.env.e2e
+.admin-pass.txt
+admin-pass.txt
+*.admin-pass.txt
+
+# Node.js dependencies and build outputs (SDK, web apps and examples)
+node_modules/
+dist/
+playwright-report/
+test-results/
+/sdk/typescript/node_modules/
+/examples/minimal-client-typescript/node_modules/
+/apps/whiteboard/dist/
+
+# Locally generated TLS material for examples (never commit private keys)
+/examples/precommit-zone-guard/*.pem
+
+# standalone load generator
+apps/load-generator/target/
+
+deploy/dev-password-denylist.txt
+
+# Worker progress log (local only, never committed)
+PROGRESS.log
+.orbisync-admin/
+.admin-recovery/
+
+# Local verification logs from improvement 03. Non-secret, but they are run
+# artefacts rather than sources.
+/artifacts/improvement-03/
+
+# Built consumer distribution
+/sdk/typescript/dist/
+/examples/minimal-client-typescript/dist/
+/examples/minimal-client-typescript/*.tgz
+/artifacts/consumer-kit/
+
+# Local engine administration verification artifacts
+/artifacts/engine-web-admin/
+
+# Local restore verification history; production should point the runner at
+# persistent operator-managed storage outside the checkout.
+/var/restore-verification/

@@ -1,0 +1,30 @@
+[package]
+name = "orbisync-application"
+description = "OrbiSync use cases, port traits and transaction boundaries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Dependency rule (`repo-crate-conventions.md` §3.2): `application` depends on `domain` only. Its public API must not name HTTP, DB or WebSocket types (§8 condition 2).
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+generic-array = { workspace = true }
+hmac = { workspace = true }
+orbisync-domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+pollster = { workspace = true }
+
+[lints]
+workspace = true

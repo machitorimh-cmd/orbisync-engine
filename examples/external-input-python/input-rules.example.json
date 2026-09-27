@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "world_id": "REPLACE_WITH_PROVISIONED_WORLD_UUID",
+      "rule": "example.move",
+      "component_key": "example.position",
+      "endpoint": "https://rules.example.com/compute",
+      "signing_secret_ref": "ORBISYNC_RULE_SECRET"
+    }
+  ]
+}

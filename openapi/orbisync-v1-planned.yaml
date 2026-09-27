@@ -1,0 +1,21 @@
+openapi: 3.1.0
+info:
+  title: OrbiSync REST API - Planned (not yet served)
+  version: 1.0.0-planned
+  description: 'Design-reviewed operations that are intentionally NOT included in
+    openapi/orbisync-v1.yaml because the server does not yet serve them. This file
+    exists to preserve design intent (reviewed and agreed) without making the published
+    v1 contract lie. Do not publish this file as the implemented contract. The implemented
+    contract is openapi/orbisync-v1.yaml (31 paths / 40 operations after the
+    integration moved all 17 remaining planned operations to implemented).
+    This file intentionally contains 0 path entries / 0 operations. The gate
+    scripts/validate_openapi_routes.py asserts that nothing here is routable and
+    that implemented + planned equals the current 31-path / 40-operation design,
+    so deleting an operation without implementation is a failure.
+
+    '
+servers:
+- url: https://localhost
+security:
+- bearerAuth: []
+paths: {}

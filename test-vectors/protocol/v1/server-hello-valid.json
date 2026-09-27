@@ -1,0 +1,19 @@
+{
+  "description": "Minimal valid ServerHello envelope for v1 with compression disabled",
+  "subprotocol": "orbisync.v1.protobuf",
+  "envelope": {
+    "protocol_major": 1,
+    "protocol_minor": 0,
+    "message_id": "0192d43d-a18a-7fed-8123-3123456789ab",
+    "sequence": 1,
+    "sent_at_unix_ms": 1785481200000,
+    "server_hello": {
+      "negotiated_minor": 0,
+      "connection_id": "0192d43d-a18a-7fed-8123-4123456789ab",
+      "heartbeat_interval_ms": 20000,
+      "server_time_unix_ms": 1785481200000,
+      "negotiated_compression": "",
+      "enabled_features": []
+    }
+  }
+}

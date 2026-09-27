@@ -1,0 +1,6 @@
+# `unwrap()` / `expect()` bans are configured as workspace lints in Cargo.toml
+# (`repo-crate-conventions.md` §7.1). This file holds clippy's tunables.
+avoid-breaking-exported-api = false
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+too-many-arguments-threshold = 8

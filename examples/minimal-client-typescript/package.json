@@ -1,0 +1,24 @@
+{
+  "name": "@orbisync/minimal-client-typescript",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Runnable OrbiSync connection and predicted movement starter",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "start": "node dist/main.js",
+    "check": "tsc --noEmit",
+    "test": "cd ../.. && node --import ./sdk/typescript/node_modules/tsx/dist/loader.mjs --test examples/minimal-client-typescript/src/connect.test.ts",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "@orbisync/client": "file:./orbisync-client-0.1.0.tgz"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "description": "Golden cursors for pagination codec – detects HMAC / payload / key-normalization regressions (GV-1)",
+  "key": "test-only-pagination-golden-v1-TEST-NOT-PROD-32B!",
+  "vectors": [
+    {
+      "kind": "users",
+      "last_id": "0199a1b2-3c4d-7000-8000-000000000042",
+      "cursor": "eyJ2IjoxLCJrIjoidXNlcnMiLCJpZCI6IjAxOTlhMWIyLTNjNGQtNzAwMC04MDAwLTAwMDAwMDAwMDA0MiJ9.9k4Jq5Txdgoke_cacOGL6t5vBBC7650j1nQLJiKOjOk"
+    },
+    {
+      "kind": "roles",
+      "last_id": "0199a1b2-3c4d-7000-8000-000000000042",
+      "cursor": "eyJ2IjoxLCJrIjoicm9sZXMiLCJpZCI6IjAxOTlhMWIyLTNjNGQtNzAwMC04MDAwLTAwMDAwMDAwMDA0MiJ9.rkFXVoMqI1K8NGV5qrR_ww7Ia2JUl11Of3ScOQJQKZE"
+    },
+    {
+      "kind": "audit",
+      "ts_millis": 1700000000000,
+      "id": "0199a1b2-3c4d-7000-8000-000000000042",
+      "filter": {
+        "from": null,
+        "to": null,
+        "actor_id": null,
+        "action": "user.created"
+      },
+      "filter_hash": "QlmmLkf8BPB6WaWjcosS6Ha4_1IgEMlaMnqHoJGDgNY",
+      "cursor": "eyJ2IjoxLCJrIjoiYXVkaXQiLCJpZCI6IjAxOTlhMWIyLTNjNGQtNzAwMC04MDAwLTAwMDAwMDAwMDA0MiIsInRzIjoxNzAwMDAwMDAwMDAwLCJmaCI6IlFsbW1Ma2Y4QlBCNldhV2pjb3NTNkhhNF8xSWdFTWxhTW5xSG9KR0RnTlkifQ.vVedtB0BOzl94rSsAxAT34lD6tQzf8hG1GLf8Zf47v8"
+    }
+  ]
+}
