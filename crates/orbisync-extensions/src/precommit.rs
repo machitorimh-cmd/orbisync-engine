@@ -268,8 +268,8 @@ impl ReqwestPreCommitClient {
     /// Builds a client that trusts one additional root certificate instead
     /// of disabling certificate verification, for real end-to-end tests
     /// hosted in other crates (e.g. `tests/integration`) that cannot reach
-    /// this crate's `#[cfg(test)]`-only [`Self::try_new_for_test`]. See
-    /// [`crate::delivery::build_precommit_client_with_root_cert`].
+    /// this crate's `#[cfg(test)]`-only `Self::try_new_for_test`. Uses the
+    /// internal `delivery::build_precommit_client_with_root_cert` builder.
     pub fn try_new_with_root_cert(
         resolver: Arc<dyn DnsResolver>,
         allow_loopback: bool,
@@ -312,13 +312,13 @@ impl ReqwestPreCommitClient {
 pub struct PreCommitHttpResponse {
     /// HTTP status code.
     pub status: u16,
-    /// Raw response body, capped at [`MAX_RESPONSE_BODY_BYTES`].
+    /// Raw response body, capped at 16 KiB by [`ReqwestPreCommitClient`].
     pub body: Vec<u8>,
 }
 
 /// Transport port that returns a full response body, used by
 /// [`PreCommitValidationGate`] instead of the body-discarding
-/// [`HttpClient`] trait.
+/// [`crate::delivery::HttpClient`] trait.
 #[async_trait::async_trait]
 pub trait PreCommitBodyClient: Send + Sync + 'static {
     /// Sends one request, enforcing the supplied timeout, and returns the
