@@ -70,7 +70,8 @@ impl Service {
     }
 
     pub async fn start() -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Another concurrent test may have already installed this provider.
+        drop(rustls::crypto::ring::default_provider().install_default());
         let cert = rcgen::generate_simple_self_signed(vec!["rules.test".into()]).unwrap();
         let ca = cert.cert.pem().into_bytes();
         let config = rustls::ServerConfig::builder()

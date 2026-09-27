@@ -339,12 +339,13 @@ describe("W-20 reconnect e2e (real server + real socket)", () => {
       // --- Resync fallback path: invalidate token and force another unexpected close ---
       // Force resume to fail (invalid token) and assert SDK recovers via fresh join, not death
       connA._setResumeToken("invalid-token-000000000000000000000000000000000000");
-      const freshSnapshot = waitForEvent(instA, "snapshotApplied", () => true, 6000);
+      const freshSnapshot = waitForEvent(instA, "snapshot", () => true, 6000);
       // Also ensure B creates another entity that fresh snapshot should contain?
       // Instead, just kill and wait for fresh join
       connA._forceCloseTransport(4000, "test invalid token resync");
       await sleep(4000); // allow backoff + fresh join
-      const freshState = await freshSnapshot as { entities: Array<{ entity_id: string }> };
+      const fresh = await freshSnapshot as { data: Uint8Array };
+      const freshState = JSON.parse(Buffer.from(fresh.data).toString("utf8")) as { entities: Array<{ entity_id: string }> };
       assert.ok(freshState.entities.some(entity => entity.entity_id === entity1));
 
       assert.equal(connA._getWs().readyState, 1, "WebSocket should be OPEN after resync fallback");

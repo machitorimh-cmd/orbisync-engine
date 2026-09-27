@@ -1377,7 +1377,10 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                                 let entity_store = Arc::clone(&tick_persistent_entity_store);
                                 async move {
                                     let Some(instance_id) = instance else {
-                                        let _storage = storage_permits.acquire().await.expect("periodic budget open");
+                                        let Ok(_storage) = storage_permits.acquire().await else {
+                                            tracing::error!(event="runtime.periodic_budget_closed");
+                                            return Vec::new();
+                                        };
                                         return match generation {
                                             Some(service) => service.projection_page().await.unwrap_or_default(),
                                             None => Vec::new(),
@@ -1404,24 +1407,23 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                                     }
                                     // Only this bounded job can run periodic work for this
                                     // instance until all its drained writes have completed.
-                                    let _storage = storage_permits.acquire().await.expect("periodic budget open");
+                                    let Ok(_storage) = storage_permits.acquire().await else {
+                                        tracing::error!(event="runtime.periodic_budget_closed");
+                                        return Vec::new();
+                                    };
                                     if let Some(service) = &generation {
-                                        if let Some(handle) = &handle {
-                                            if work.checkpoint {
-                                                if let Err(error) = service.persist(handle.clone(), now).await {
-                                                    tracing::warn!(event="generation.periodic_unavailable", %error);
-                                                }
-                                            }
+                                        if let Some(handle) = &handle
+                                            && work.checkpoint
+                                            && let Err(error) = service.persist(handle.clone(), now).await {
+                                            tracing::warn!(event="generation.periodic_unavailable", %error);
                                         }
-                                        if work.project || (handle.is_some() && work.checkpoint) {
-                                            if let Err(error) = service.project(instance_id).await {
-                                                tracing::warn!(event="generation.projection_pending", %error);
-                                            }
+                                        if (work.project || (handle.is_some() && work.checkpoint))
+                                            && let Err(error) = service.project(instance_id).await {
+                                            tracing::warn!(event="generation.projection_pending", %error);
                                         }
-                                        if handle.is_some() && work.checkpoint {
-                                            if let Err(error) = service.cleanup(instance_id).await {
-                                                tracing::warn!(event="generation.cleanup_pending", %error);
-                                            }
+                                        if handle.is_some() && work.checkpoint
+                                            && let Err(error) = service.cleanup(instance_id).await {
+                                            tracing::warn!(event="generation.cleanup_pending", %error);
                                         }
                                         if handle.is_some() {
                                             match service.reap(&registry, instance_id, now).await {
@@ -2357,6 +2359,9 @@ async fn wait_for_signal() {
 }
 
 /// Performs the ordered graceful-shutdown sequence from specification §37.3.
+// Reason: the composition root transfers independently owned drain tasks and
+// shutdown signals explicitly; grouping them would obscure their drop order.
+#[allow(clippy::too_many_arguments)]
 async fn shutdown_signal(
     shutdown: Arc<ShutdownState>,
     realtime: Arc<realtime_ws::RealtimeState>,

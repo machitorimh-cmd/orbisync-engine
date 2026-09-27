@@ -149,7 +149,7 @@ pub async fn login(
         .enabled_auth_methods()
         .contains(&orbisync_domain::AuthMethod::Local)
     {
-        return method_disabled_response(request_id);
+        return method_disabled_error_response(request_id);
     }
 
     let source_ip = state.resolve_source_ip(&headers, connect_info.map(|value| value.0.0));
@@ -670,7 +670,7 @@ struct AuthMethodsResponse {
     methods: Vec<&'static str>,
 }
 
-fn method_disabled_response(request_id: String) -> Response {
+fn method_disabled_error_response(request_id: String) -> Response {
     // Identical whether the method is switched off or was never configured, so
     // the response cannot be used to probe the deployment's settings.
     error_response(
@@ -702,7 +702,7 @@ fn issue_error_response(
 ) -> Response {
     use orbisync_application::ApplicationErrorKind;
     match error.kind() {
-        ApplicationErrorKind::NotAuthorized => method_disabled_response(request_id),
+        ApplicationErrorKind::NotAuthorized => method_disabled_error_response(request_id),
         ApplicationErrorKind::DomainRule => error_response(
             ErrorCode::InvalidRequest,
             error.detail().to_owned(),
@@ -821,7 +821,7 @@ pub async fn guest(
         return error_response(ErrorCode::InvalidRequest, rejection.body_text(), request_id);
     }
     let Some(service) = state.ephemeral_subject_service() else {
-        return method_disabled_response(request_id);
+        return method_disabled_error_response(request_id);
     };
     let (source_ip, req_id) = match issue_context(&state, &headers, connect_info, &request_id) {
         Ok(value) => value,
@@ -847,7 +847,7 @@ pub async fn name_only(
         Err(response) => return *response,
     };
     let Some(service) = state.ephemeral_subject_service() else {
-        return method_disabled_response(request_id);
+        return method_disabled_error_response(request_id);
     };
     let (source_ip, req_id) = match issue_context(&state, &headers, connect_info, &request_id) {
         Ok(value) => value,
@@ -872,7 +872,7 @@ pub async fn external(
 ) -> Response {
     let request_id = context.request_id().to_owned();
     let Some(service) = state.external_auth_service() else {
-        return method_disabled_response(request_id);
+        return method_disabled_error_response(request_id);
     };
     let body = match read_json(body, &request_id) {
         Ok(value) => value,

@@ -1501,7 +1501,7 @@ async fn exercise_input(
             assert_eq!(expect_error(&mut a).await.code, "INVALID_ARGUMENT");
         }
         service.task.abort();
-        let _ = service.task.await;
+        assert!(service.task.await.unwrap_err().is_cancelled());
         a.send(Message::Binary(
             entity_command_bytes(entity, 2, "input", Some(intent(1.0)), 11).into(),
         ))

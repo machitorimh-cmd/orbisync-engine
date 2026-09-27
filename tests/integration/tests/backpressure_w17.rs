@@ -406,8 +406,18 @@ async fn spawn_publication_bytes(
         ..
     } = outcome
     else {
-        panic!("fixture spawn must apply");
+        panic!("fixture spawn must apply: {outcome:?}");
     };
+    // This harness has no persistence worker. Consume its test batch before
+    // preparing more entities, so only the delivery queue is under pressure.
+    let drained = state
+        .registry
+        .handle(instance_id)
+        .expect("actor handle")
+        .tick(now_ts(), false)
+        .await
+        .expect("fixture persistence batch");
+    assert!(!drained.persistence_events.is_empty());
     let cmd = orbisync_protocol::v1::EntityCommand {
         command_id: uuid::Uuid::now_v7().to_string(),
         entity_id: entity.to_string(),
