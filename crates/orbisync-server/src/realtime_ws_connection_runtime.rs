@@ -703,7 +703,7 @@ async fn run_connected_socket(
                 heartbeat.record_activity(now);
                 let message_id_for_payload = env.message_id.clone();
                 // Serialize publication and snapshot handoff within this room.
-                let _publication_guard = publication_lock.lock().await;
+                let mut publication_guard = Some(publication_lock.lock().await);
                 match env.payload.take() {
                     Some(envelope::Payload::DomainEvent(event)) => {
                         match publish_client_event(
@@ -1501,7 +1501,14 @@ async fn run_connected_socket(
                                             component_key,
                                             payload,
                                         };
-                                        match gate.validate(&registration, &request).await {
+                                        // The external hook must not serialize unrelated
+                                        // publications or snapshot reads for this instance.
+                                        // Reacquire before authorization and observed-state
+                                        // checks, retaining the commit/publication barrier.
+                                        drop(publication_guard.take());
+                                        let decision = gate.validate(&registration, &request).await;
+                                        publication_guard = Some(publication_lock.lock().await);
+                                        match decision {
                                             PreCommitDecision::Deny { reason } => {
                                                 send_error(
                                                     &mut socket,

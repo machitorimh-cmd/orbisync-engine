@@ -49,7 +49,7 @@ SDK_TS_FILES = [
 HELPER_FILES = [
     ROOT / "crates" / "orbisync-e2e-helper" / "src" / "main.rs",
     ROOT / "examples" / "minimal-client-typescript" / "src" / "main.ts",
-    ROOT / "apps" / "reference-web" / "src" / "main.ts",
+    ROOT / "apps" / "reference-web" / "src" / "online.ts",
 ]
 
 # ErrorCode -> HTTP status mapping mirrors crates/orbisync-transport-http/src/lib.rs ErrorCode::status
@@ -302,7 +302,7 @@ def check_helper_and_examples(root: Path = ROOT) -> list[str]:
     for rel in [
         "crates/orbisync-e2e-helper/src/main.rs",
         "examples/minimal-client-typescript/src/main.ts",
-        "apps/reference-web/src/main.ts",
+        "apps/reference-web/src/online.ts",
     ]:
         path = root / rel
         if not path.exists():
@@ -334,10 +334,14 @@ def check_helper_and_examples(root: Path = ROOT) -> list[str]:
         else:
             # The reference app uses the SDK's checked ticket parser through
             # connect(), while the standalone example fetches the ticket itself.
-            if rel == "apps/reference-web/src/main.ts":
+            if rel == "apps/reference-web/src/online.ts":
+                main_path = root / "apps/reference-web/src/main.ts"
+                main = main_path.read_text(encoding="utf-8") if main_path.exists() else ""
+                if 'await import("./online")' not in main or "new OnlineSession(" not in main:
+                    errors.append("reference-web entry point must load the checked online session")
                 if not all(
                     snippet in text
-                    for snippet in ("new OrbiSyncClient(", "await client.connect()", "await nextConnection.join(")
+                    for snippet in ("new OrbiSyncClient(", "await client.connect()", "await this.connection.join(")
                 ):
                     errors.append(f"{rel} must connect and join through OrbiSyncClient")
             elif "realtime_ticket" not in text:

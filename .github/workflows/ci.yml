@@ -78,7 +78,7 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-features
       - name: Unit, contract and doc tests
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --no-fail-fast
 
   architecture:
     name: Dependency rules
@@ -344,7 +344,7 @@ jobs:
       - name: Apply migrations
         run: cargo run -p orbisync-server -- migrate
       - name: Integration tests
-        run: cargo test -p orbisync-integration-tests --all-features
+        run: cargo test -p orbisync-integration-tests --all-features --no-fail-fast
 
   restore-drill:
     name: Restore drill (PostgreSQL)

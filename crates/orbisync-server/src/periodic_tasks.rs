@@ -193,6 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::panic)] // Intentional fault injection verifies task cleanup after a panic.
     async fn failed_task_releases_its_instance_key() {
         let mut tasks = PeriodicTasks::new(1);
         tasks.enqueue(None, Work::default());

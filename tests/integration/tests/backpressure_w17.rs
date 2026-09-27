@@ -782,8 +782,10 @@ async fn backpressure_w17_reliable_overflow_disconnects() {
             payload,
             orbisync_server::delivery::Reliability::LatestWins,
         );
+        disconnected += outcome.disconnected_slow_consumers;
         // No yield — burst
     }
+    assert_eq!(disconnected, 2, "both reliable queues must report overflow");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // A closed full queue need not have capacity for an error frame. Verify

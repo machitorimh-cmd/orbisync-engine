@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from scripts import check_realtime_sample_contract as contract
+from scripts import check_realtime_ticket_contract as tickets
 
 
 class RealtimeSampleContractTests(unittest.TestCase):
@@ -38,6 +39,24 @@ class RealtimeSampleContractTests(unittest.TestCase):
             + source[opening + 1 : true_close]
             + source[false_close:]
         )
+
+    def test_reference_online_module_must_use_sdk_and_be_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = [path.relative_to(tickets.ROOT) for path in tickets.HELPER_FILES]
+            inputs.append(Path("apps/reference-web/src/main.ts"))
+            for relative in inputs:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text((tickets.ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+            self.assertEqual(tickets.check_helper_and_examples(root), [])
+            online = root / "apps/reference-web/src/online.ts"
+            source = online.read_text(encoding="utf-8")
+            online.write_text(source.replace("await client.connect()", "await other.connect()"), encoding="utf-8")
+            self.assertTrue(tickets.check_helper_and_examples(root))
+            online.write_text(source, encoding="utf-8")
+            (root / "apps/reference-web/src/main.ts").write_text("", encoding="utf-8")
+            self.assertTrue(tickets.check_helper_and_examples(root))
 
     def test_repository_contract_is_consistent(self) -> None:
         self.assertEqual(contract.check_contract(contract.ROOT), [])
