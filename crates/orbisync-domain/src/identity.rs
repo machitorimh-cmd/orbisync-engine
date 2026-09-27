@@ -489,7 +489,7 @@ fn validate_display_name(value: String) -> Result<String, DomainError> {
 
 /// Validates a visitor-supplied display name for name-only participation.
 ///
-/// Stricter than [`validate_display_name`]: surrounding whitespace is trimmed
+/// Stricter than `validate_display_name`: surrounding whitespace is trimmed
 /// and a name that is only whitespace is rejected, so a blank entry cannot
 /// become a participant whose name renders as nothing. The name is a label,
 /// never an authentication factor or a permission — two visitors may hold the
