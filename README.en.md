@@ -8,7 +8,11 @@
 
 OrbiSync is a Rust real-time synchronization engine for sharing worlds, entities, transforms, state, and events between authenticated clients. It provides PostgreSQL persistence, a REST API, a Protocol Buffers WebSocket protocol, and a TypeScript SDK. Rendering, assets, physics, and application-specific rules belong in clients or external services.
 
-This README describes the current source and configuration in the OSS repository. This is a source distribution under development, not a release certified for production or a guarantee of performance or connection capacity. This documentation update was checked statically against code and configuration; builds, tests, live services, and load tests were not rerun. Historical verification is not presented as a new validation of this public snapshot.
+This README describes the current source and configuration in the OSS repository. The project is under development, not certified for production or a guarantee of performance or connection capacity. Each release's notes record binary builds, startup checks, and untested areas. Historical verification is not presented as a new full test run, live-service validation, or load test of this public snapshot.
+
+## Prebuilt server
+
+[GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.1) provides a Windows x64 ZIP and a Linux x86_64 tar.gz. Rust and Node.js are unnecessary; PostgreSQL is required separately. Each archive includes Japanese/English startup guides, a launcher, project licenses, and dependency licenses. Checksums are in `SHA256SUMS.txt`. [Usage guide](deploy/distribution/README.en.md)
 
 ## Implementation status
 
