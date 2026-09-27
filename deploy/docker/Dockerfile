@@ -4,7 +4,7 @@
 # the single binary only (TD-10). The container runs as a non-root user
 # (`deployment-and-threat-model.md`, `test-and-ci.md` §2.10).
 
-FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
+FROM rust:1.98-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS builder
 
 WORKDIR /src
 
