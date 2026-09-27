@@ -41,7 +41,7 @@ http-body-util = "0.1"
 http-body = "1"
 generic-array = "1.4"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
-hmac = "0.12"
+hmac = "0.13"
 ipnet = "2"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 pollster = "0.4"
