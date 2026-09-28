@@ -42,7 +42,7 @@ orbisync-world-runtime = { workspace = true, features = ["test-support"] }
 argon2 = { version = "0.5.3", default-features = false, features = ["std", "password-hash"] }
 futures-util = { version = "0.3.33", default-features = false, features = ["sink", "std"] }
 jsonwebtoken = { workspace = true }
-password-hash = { version = "0.5.0", default-features = false }
+password-hash = { version = "0.6.1", default-features = false }
 prost = { workspace = true }
 prost-types = { workspace = true }
 rcgen = { workspace = true }
