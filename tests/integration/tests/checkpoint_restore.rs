@@ -24,6 +24,17 @@ use uuid::Uuid;
 
 mod common;
 
+/// Successful saves apply a 30-day retention cutoff using the database clock.
+/// Anchor round-trip fixtures to that same clock so a fixed calendar date can
+/// never age out the row before the restore and stale-writer assertions run.
+async fn fresh_checkpoint_timestamp(pool: &sqlx::PgPool) -> Timestamp {
+    let now: time::OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .expect("read checkpoint retention clock");
+    Timestamp::from_offset_date_time(now)
+}
+
 /// Counts `checkpoint_restore_rejected_total` increments (HIGH-001 round 5):
 /// join must classify an oversized `load_latest` failure and count it,
 /// whether the rejection came from the pre-fetch length gate or the
@@ -320,7 +331,7 @@ async fn postgres_checkpoint_round_trip_restores_runtime_state() {
     };
     let world_id = Uuid::now_v7();
     let instance_id = InstanceId::new(Uuid::now_v7()).expect("instance id");
-    let timestamp = Timestamp::from_unix_millis(1_788_000_000_000).expect("timestamp");
+    let timestamp = fresh_checkpoint_timestamp(&pool).await;
     sqlx::query(
         "INSERT INTO world_definitions
          (id, name, status, capacity, default_spawn, metadata, revision, created_at, updated_at)
@@ -383,12 +394,18 @@ async fn postgres_checkpoint_round_trip_restores_runtime_state() {
         .save_checkpoint(durable.clone())
         .await
         .expect("save checkpoint");
+    let saved = store
+        .load_latest(instance_id)
+        .await
+        .expect("read initial saved checkpoint")
+        .expect("fresh checkpoint must survive retention");
+    assert_eq!(saved.revision, runtime_checkpoint.revision);
 
     // A rejected command outcome is durable progress even when the actor
     // revision is unchanged. It must be merged into and restored from the
     // same revision's checkpoint.
     let rejected_id = orbisync_domain::CommandId::generate();
-    let dedup_timestamp = Timestamp::from_unix_millis(1_788_000_000_001).expect("timestamp");
+    let dedup_timestamp = timestamp.checked_add_millis(1).expect("dedup timestamp");
     let mut rejected_checkpoint = Checkpoint::new(
         instance_id,
         runtime_checkpoint.revision,
@@ -425,13 +442,13 @@ async fn postgres_checkpoint_round_trip_restores_runtime_state() {
         instance_id,
         runtime_checkpoint.revision,
         Vec::new(),
-        Timestamp::from_unix_millis(1_788_000_000_001).expect("timestamp"),
+        dedup_timestamp,
     );
     let stale_b = Checkpoint::new(
         instance_id,
         runtime_checkpoint.revision,
         Vec::new(),
-        Timestamp::from_unix_millis(1_788_000_000_002).expect("timestamp"),
+        timestamp.checked_add_millis(2).expect("stale timestamp"),
     );
     let stale_a = AppCheckpoint::new(
         instance_id,
@@ -530,7 +547,7 @@ async fn postgres_checkpoint_lifecycle_rejoin_restores_entity_and_monotonic_revi
     };
     let world_id = Uuid::now_v7();
     let instance_id = InstanceId::new(Uuid::now_v7()).expect("instance id");
-    let timestamp = Timestamp::from_unix_millis(1_788_000_100_000).expect("timestamp");
+    let timestamp = fresh_checkpoint_timestamp(&pool).await;
     sqlx::query(
         "INSERT INTO world_definitions
          (id, name, status, capacity, default_spawn, metadata, revision, created_at, updated_at)
