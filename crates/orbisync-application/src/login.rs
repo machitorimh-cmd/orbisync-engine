@@ -79,6 +79,9 @@ pub struct LoginCommit<'a> {
     pub expected_failed_count: u32,
     /// Expected lock deadline observed at `find_login` time.
     pub expected_locked_until: Option<Timestamp>,
+    /// Exact credential verified before hashing. Commit must reject a changed
+    /// credential or disabled user while serializing with password/status edits.
+    pub expected_password_hash: &'a PasswordHash,
     /// Upgraded password hash when Argon2 parameters changed.
     pub new_password_hash: Option<&'a PasswordHash>,
 }
@@ -162,7 +165,10 @@ pub struct SubjectCommit<'a> {
 /// fail-closed (`observability-and-config.md:5`).
 #[async_trait::async_trait]
 pub trait LoginTransactionStore: Send + Sync + 'static {
-    /// Atomically commits a successful authentication.
+    /// Atomically commits a successful authentication. Returns `Conflict` when
+    /// the verified credential changed or the user was disabled before commit.
+    /// Concurrent failed-login counter changes alone must remain preserved and
+    /// must not reject a successful login.
     async fn commit_success(&self, commit: LoginCommit<'_>) -> Result<(), IdentityPortError>;
     /// Atomically records a failed authentication attempt.
     ///
@@ -188,6 +194,8 @@ pub trait LoginTransactionStore: Send + Sync + 'static {
     /// An external pair already mapped to another user returns `Conflict`
     /// after rolling back the entire transaction. The caller must resolve the
     /// committed mapping and regenerate session/token material before retrying.
+    /// An absent or disabled existing subject returns `NotFound`; implementations
+    /// must serialize the active-state check with administrative disable.
     async fn commit_subject_success(
         &self,
         commit: SubjectCommit<'_>,

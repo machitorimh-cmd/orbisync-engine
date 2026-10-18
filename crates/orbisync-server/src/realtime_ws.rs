@@ -183,6 +183,7 @@ mod tests {
     include!("realtime_ws_tests_snapshot.rs");
     include!("realtime_ws_tests_sync.rs");
     include!("realtime_ws_tests_shutdown.rs");
+    include!("realtime_ws_tests_review_regressions.rs");
 }
 
 #[cfg(test)]

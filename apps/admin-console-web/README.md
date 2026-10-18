@@ -53,6 +53,12 @@ npm --prefix apps/admin-console-web run check
 npm --prefix apps/admin-console-web run build
 ```
 
+SDKの開発依存が導入済みなら、HTTPモックによる認証世代・接続先変更の回帰テストも実行できます。
+
+```shell
+npm --prefix apps/admin-console-web run test:unit
+```
+
 ブラウザ回帰テストは、実 Chromium 上で画面を操作し、決定的なモック REST API に対する認証、冪等性キー、revision 照合、主要な管理操作を検査します。初回だけ Playwright の Chromium を導入してください。
 
 ```shell

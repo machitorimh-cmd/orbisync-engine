@@ -1,10 +1,16 @@
 import { OrbiSyncClient, uuidv7, type SyncedEntity, type OrbiSyncInstance } from "../../../sdk/typescript/src/client.js";
 import { notePayload } from "../rules/whiteboard-state.mjs";
 import { ConfirmedCommands, CommandUncertain, type Request } from "./confirmed_commands.js";
+import { NoteBoard, type Note } from "./note_board.js";
 import "./style.css";
-type Note={id:string;text:string;x:number;y:number;color:string;locked:boolean;revision:bigint};
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 let client:OrbiSyncClient|null=null;let instance:OrbiSyncInstance|null=null;let joined=false;const notes=new Map<string,Note>();let commands:ConfirmedCommands|null=null;const colors=["yellow","rose","mint","blue"];
+const boardView=new NoteBoard($("board"),{
+  text:(id,text)=>{const note=notes.get(id);if(!note||!joined||!commands)return false;update(note,{text});return true},
+  lock:id=>{const note=notes.get(id);if(note)toggleLock(note)},
+  remove:id=>{const note=notes.get(id);if(note)remove(note)},
+  drag:(event,element,id)=>{const note=notes.get(id);if(note)drag(event,element,note)},
+});
 function log(s:string){const e=$("log") as HTMLPreElement;e.textContent=`${new Date().toLocaleTimeString()}  ${s}\n${e.textContent}`}
 function message(s:string){$("authMessage").textContent=s;log(s)}
 function toNote(entity:SyncedEntity):Note|null {
@@ -17,7 +23,7 @@ function toNote(entity:SyncedEntity):Note|null {
 }
 function refreshState(){notes.clear();for(const entity of instance?.state.entities.values()??[]){const note=toNote(entity);if(note)notes.set(note.id,note)}render()}
 function syncControls(){joined=instance?.syncStatus==="ready";($("add") as HTMLButtonElement).disabled=!joined;$("syncState").textContent=joined?"同期完了":"同期を待っています";render();renderCreations()}
-function render(){const b=$("board");b.replaceChildren();for(const n of notes.values()){const el=document.createElement("article");el.className=`note ${n.color} ${n.locked?"locked":""}`;el.style.left=`${n.x}px`;el.style.top=`${n.y}px`;el.innerHTML=`<div class="note-head"><span>${n.locked?"🔒":"✦"}</span><span><button class="lock-button" aria-label="${n.locked?"ロック解除":"ロック"}">${n.locked?"解除":"ロック"}</button><button aria-label="削除">×</button></span></div><textarea aria-label="付箋本文"></textarea><small>${n.locked?"ロック中":"未ロック"}</small>`;const ta=el.querySelector("textarea")!;ta.value=n.text;ta.disabled=!joined||!!commands?.hasPending(n.id);for(const button of Array.from(el.querySelectorAll("button")))button.disabled=!joined||!!commands?.hasPending(n.id);ta.addEventListener("change",()=>update(n,{text:ta.value}));el.querySelector(".lock-button")!.addEventListener("click",()=>toggleLock(n));el.querySelectorAll("button")[1]!.addEventListener("click",()=>remove(n));el.addEventListener("pointerdown",e=>drag(e,el,n));b.appendChild(el)}$("count").textContent=String(notes.size)}
+function render(){boardView.render(notes.values(),joined,id=>!!commands?.hasPending(id));$("count").textContent=String(notes.size)}
 // Every command is bound to the revision Core last confirmed, which the
 // pre-commit rule compares against the revision it read itself.
 function latest(n:Note){return notes.get(n.id)??n}

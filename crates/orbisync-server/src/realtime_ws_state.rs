@@ -523,7 +523,13 @@ impl RealtimeState {
         if expired.is_empty() {
             return 0;
         }
-        for binding in expired.iter().filter(|binding| binding.disconnected) {
+        let mut reclaimed = 0;
+        for binding in &expired {
+            if self.registry.is_present(binding.instance_id, binding.presence_id) != Some(true) {
+                self.resume_store.complete_cleanup(binding.presence_id, binding.epoch);
+                reclaimed += 1;
+                continue;
+            }
             if let Err(error) = self.registry.submit_sync(
                 binding.instance_id,
                 InstanceCommand::Leave {
@@ -536,9 +542,15 @@ impl RealtimeState {
                     error = ?error,
                 );
             }
+            // The task-owned compatibility path only enqueues, so keep the
+            // claim until a subsequent pass observes the membership removed.
+            if self.registry.is_present(binding.instance_id, binding.presence_id) != Some(true) {
+                self.resume_store.complete_cleanup(binding.presence_id, binding.epoch);
+                reclaimed += 1;
+            }
         }
         record_total_members(&self.registry, self.metrics_recorder.as_ref());
-        expired.len()
+        reclaimed
     }
 
     /// Removes expired resume bindings through their task-owned actors.
@@ -547,26 +559,34 @@ impl RealtimeState {
         if expired.is_empty() {
             return 0;
         }
-        for binding in expired.iter().filter(|binding| binding.disconnected) {
-            if let Err(error) = self
-                .registry
-                .submit(
-                    binding.instance_id,
-                    InstanceCommand::Leave {
-                        presence_id: binding.presence_id,
-                    },
-                )
-                .await
-            {
-                tracing::warn!(
-                    event = "realtime.expired_resume_leave_failed",
-                    instance_id = %binding.instance_id,
-                    error = ?error,
-                );
+        let mut reclaimed = 0;
+        for binding in &expired {
+            if self.release_resume_membership(binding).await {
+                reclaimed += 1;
             }
         }
         record_total_members(&self.registry, self.metrics_recorder.as_ref());
-        expired.len()
+        reclaimed
+    }
+
+    /// A failed or cancelled mailbox submission leaves its cleanup claim in
+    /// the store for retry. Eviction and periodic expiry share this boundary.
+    async fn release_resume_membership(&self, binding: &orbisync_realtime::session_store::ResumeBinding) -> bool {
+        if self.registry.is_present(binding.instance_id, binding.presence_id) != Some(true) {
+            self.resume_store.complete_cleanup(binding.presence_id, binding.epoch);
+            return true;
+        }
+        let result = self.registry.submit(binding.instance_id, InstanceCommand::Leave {
+            presence_id: binding.presence_id,
+        }).await;
+        if matches!(result, Ok(CommandOutcome::Applied { .. }))
+            || self.registry.is_present(binding.instance_id, binding.presence_id) != Some(true) {
+            self.resume_store.complete_cleanup(binding.presence_id, binding.epoch);
+            return true;
+        }
+        tracing::warn!(event = "realtime.resume_binding_leave_failed", instance_id = %binding.instance_id,
+            outcome = ?result, "membership cleanup retained for retry");
+        false
     }
 
     /// Returns the configured maintenance cadence for resume expiry.
@@ -1418,7 +1438,7 @@ impl core::fmt::Debug for RealtimeState {
 ///
 /// D-26: grace期内は `PresenceId` を解放しない。切断直後に `Leave` を送ると
 /// 復帰先の membership が消え条件2が成立しない。代わりに delivery のみを
-/// 掃除し、membership は resume token の有効期間だけ保持する。期限切れ後は
+/// 掃除し、membership は切断時刻から grace 期間だけ保持する。期限切れ後は
 /// `ResumeSessionStore` の prune が `Leave` を実行するまで capacity に数え続ける
 /// (H-1 の容量テストに影響する場合は報告すること — テストを書き換えない)。
 ///
@@ -1427,6 +1447,7 @@ struct PresenceGuard {
     delivery: Arc<DeliveryRegistry>,
     instance_id: InstanceId,
     presence: PresenceId,
+    epoch: u64,
     resume_store: Arc<ResumeSessionStore>,
 }
 
@@ -1434,14 +1455,13 @@ impl Drop for PresenceGuard {
     fn drop(&mut self) {
         // D-26: do NOT issue Leave here. The presence stays in `InstanceState`
         // for the grace window so resume can rebind the same PresenceId and
-        // capacity remains accounted for. The token store holds the binding;
-        // when it expires the next join/resume path or the tick reaper will
-        // clean the membership.
+        // capacity remains accounted for. Membership ownership is independent
+        // of token TTL; the reaper releases it after the disconnect grace.
         self.delivery.cleanup_closed(self.instance_id);
         // Mark the binding so the join path may reclaim this slot if the
         // instance fills up before the grace window ends. Until then the
         // presence stays, so a resume rebinds the same PresenceId.
-        self.resume_store.mark_disconnected(self.presence);
+        self.resume_store.mark_disconnected_epoch(self.presence, self.epoch);
         // Intentionally no `actor.handle(Leave)` — see D-26 comment above.
         // For process lifetime tests where the guard is dropped and immediately
         // joined by another connection, capacity will appear full for 60 s;

@@ -139,6 +139,7 @@ impl IdentityRepository for FakeIdentityRepository {
         user_id: UserId,
         expected_failed_count: u32,
         expected_locked_until: Option<Timestamp>,
+        expected_password_hash: &PasswordHash,
         _now: Timestamp,
         new_password_hash: Option<PasswordHash>,
     ) -> Result<bool, IdentityPortError> {
@@ -150,6 +151,11 @@ impl IdentityRepository for FakeIdentityRepository {
             .values_mut()
             .find(|a| a.user.id() == user_id)
             .ok_or(IdentityPortError::NotFound)?;
+        if account.user.status() != UserStatus::Active
+            || account.credential.password_hash() != expected_password_hash
+        {
+            return Err(IdentityPortError::Conflict);
+        }
         if account.credential.failed_login_count() != expected_failed_count
             || account.credential.locked_until() != expected_locked_until
         {
@@ -562,6 +568,18 @@ impl FakeIdentityStore {
 
 #[async_trait::async_trait]
 impl IdentityRepository for FakeIdentityStore {
+    async fn find_user(&self, user_id: UserId) -> Result<Option<User>, IdentityPortError> {
+        if let Some(account) = self.find_account(user_id).await? {
+            return Ok(Some(account.user));
+        }
+        Ok(self
+            .subjects
+            .lock()
+            .unwrap_or_else(|error| panic!("fake subject lock poisoned: {error}"))
+            .get(&user_id)
+            .map(|subject| subject.user.clone()))
+    }
+
     async fn find_login(
         &self,
         login_id: &LoginId,
@@ -642,6 +660,7 @@ impl IdentityRepository for FakeIdentityStore {
         user_id: UserId,
         expected_failed_count: u32,
         expected_locked_until: Option<Timestamp>,
+        expected_password_hash: &PasswordHash,
         _now: Timestamp,
         new_password_hash: Option<PasswordHash>,
     ) -> Result<bool, IdentityPortError> {
@@ -653,6 +672,11 @@ impl IdentityRepository for FakeIdentityStore {
             .values_mut()
             .find(|a| a.user.id() == user_id)
             .ok_or(IdentityPortError::NotFound)?;
+        if account.user.status() != UserStatus::Active
+            || account.credential.password_hash() != expected_password_hash
+        {
+            return Err(IdentityPortError::Conflict);
+        }
         if account.credential.failed_login_count() != expected_failed_count
             || account.credential.locked_until() != expected_locked_until
         {
@@ -860,21 +884,53 @@ impl IdentityAdministrationStore for FakeIdentityStore {
                     {
                         account.user = user.clone();
                     }
+                    drop(accounts);
+                    if let Some(subject) = self
+                        .subjects
+                        .lock()
+                        .unwrap_or_else(|error| panic!("fake subject lock poisoned: {error}"))
+                        .get_mut(&user.id())
+                    {
+                        subject.user = user.clone();
+                    }
+                    if user.status() == UserStatus::Disabled {
+                        for session in self
+                            .sessions
+                            .lock()
+                            .unwrap_or_else(|error| panic!("fake session lock poisoned: {error}"))
+                            .values_mut()
+                        {
+                            if session.user_id() == user.id() {
+                                session.revoke(user.updated_at());
+                            }
+                        }
+                    }
                 }
                 IdentityMutation::UpdateUserProfile {
                     user,
                     expected_revision,
                 } => {
-                    let Some(account) = accounts
+                    if let Some(account) = accounts
                         .values_mut()
                         .find(|account| account.user.id() == user.id())
-                    else {
-                        return Err(IdentityPortError::NotFound);
-                    };
-                    if account.user.revision().as_u64() != *expected_revision {
-                        return Err(IdentityPortError::Conflict);
+                    {
+                        if account.user.revision().as_u64() != *expected_revision {
+                            return Err(IdentityPortError::Conflict);
+                        }
+                        account.user = user.clone();
+                    } else {
+                        let mut subjects = self
+                            .subjects
+                            .lock()
+                            .unwrap_or_else(|error| panic!("fake subject lock poisoned: {error}"));
+                        let subject = subjects
+                            .get_mut(&user.id())
+                            .ok_or(IdentityPortError::NotFound)?;
+                        if subject.user.revision().as_u64() != *expected_revision {
+                            return Err(IdentityPortError::Conflict);
+                        }
+                        subject.user = user.clone();
                     }
-                    account.user = user.clone();
                     if user.status() == UserStatus::Disabled {
                         let updated_at = user.updated_at();
                         let target = user.id();
@@ -1214,6 +1270,11 @@ impl LoginTransactionStore for FakeIdentityStore {
                 .values_mut()
                 .find(|a| a.user.id() == commit.user_id)
                 .ok_or(IdentityPortError::Unavailable)?;
+            if account.user.status() != UserStatus::Active
+                || account.credential.password_hash() != commit.expected_password_hash
+            {
+                return Err(IdentityPortError::Conflict);
+            }
             if account.credential.failed_login_count() != commit.expected_failed_count
                 || account.credential.locked_until() != commit.expected_locked_until
             {
@@ -1314,6 +1375,15 @@ impl LoginTransactionStore for FakeIdentityStore {
         };
         if should_fail {
             return Err(IdentityPortError::Unavailable);
+        }
+
+        if commit.new_user.is_none()
+            && self
+                .find_user(commit.user_id)
+                .await?
+                .is_none_or(|user| user.status() != UserStatus::Active)
+        {
+            return Err(IdentityPortError::NotFound);
         }
 
         if let Some(new_user) = commit.new_user {
@@ -1527,22 +1597,15 @@ impl LoginTransactionStore for FakeIdentityStore {
 #[async_trait::async_trait]
 impl IdentityQueryPort for FakeIdentityStore {
     async fn user(&self, id: UserId) -> Result<Option<UserView>, IdentityPortError> {
-        let accounts = self
-            .accounts
-            .lock()
-            .unwrap_or_else(|error| panic!("fake identity lock poisoned: {error}"));
-        for account in accounts.values() {
-            if account.user.id() == id {
-                return Ok(Some(UserView {
-                    id: account.user.id(),
-                    login_id: account.user.login_id().as_str().to_owned(),
-                    display_name: account.user.display_name().to_owned(),
-                    status: account.user.status(),
-                    revision: account.user.revision().as_u64(),
-                }));
-            }
-        }
-        Ok(None)
+        Ok(IdentityRepository::find_user(self, id)
+            .await?
+            .map(|user| UserView {
+                id: user.id(),
+                login_id: user.login_id().as_str().to_owned(),
+                display_name: user.display_name().to_owned(),
+                status: user.status(),
+                revision: user.revision().as_u64(),
+            }))
     }
 
     async fn users(&self, page: PageRequest) -> Result<Page<UserView>, IdentityPortError> {
@@ -1576,6 +1639,19 @@ impl IdentityQueryPort for FakeIdentityStore {
                 revision: account.user.revision().as_u64(),
             })
             .collect();
+        views.extend(
+            self.subjects
+                .lock()
+                .unwrap_or_else(|error| panic!("fake subject lock poisoned: {error}"))
+                .values()
+                .map(|subject| UserView {
+                    id: subject.user.id(),
+                    login_id: subject.user.login_id().as_str().to_owned(),
+                    display_name: subject.user.display_name().to_owned(),
+                    status: subject.user.status(),
+                    revision: subject.user.revision().as_u64(),
+                }),
+        );
         views.sort_by_key(|view| view.id.to_string());
         let start = if let Some(id_str) = after_id {
             views

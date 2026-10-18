@@ -290,6 +290,19 @@ async fn an_external_subject_holds_no_credential_row() {
             .await
             .expect("count");
     assert_eq!(credentials, 0);
+    let repo = orbisync_storage_postgres::PgIdentityRepository::new(pool.clone());
+    assert!(
+        orbisync_application::IdentityRepository::find_user(&repo, user_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        orbisync_application::IdentityRepository::find_account(&repo, user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -899,4 +912,192 @@ async fn concurrent_external_candidates_roll_back_every_losing_transaction() {
         .await
         .unwrap();
     assert_eq!(session_user, mapped.as_uuid());
+}
+
+#[tokio::test]
+async fn a_completed_password_reset_or_disable_rejects_a_stale_login_commit() {
+    use orbisync_application::{
+        IdentityAuditEvent, IdentityMutation, IdentityPortError, IdentityRepository, LoginCommit,
+    };
+    use orbisync_domain::{Credential, PasswordHash};
+    let Some(pool) = pool().await else { return };
+    let _guard = db_guard().lock().await;
+    clean(&pool).await;
+    let repo = orbisync_storage_postgres::PgIdentityRepository::new(pool.clone());
+    let admin = orbisync_storage_postgres::IdentityAdministrationStore::new(pool.clone());
+    let login = PgLoginStore::new(pool.clone());
+    let now = ts(NOW_MS);
+    let old_hash = PasswordHash::new("$argon2id$v=19$m=8192,t=1,p=1$c2FsdA$aGFzaA").unwrap();
+    let new_hash = PasswordHash::new("$argon2id$v=19$m=8192,t=2,p=1$c2FsdA$bmV3aGFzaA").unwrap();
+    for reset in [true, false] {
+        let user_id = UserId::generate();
+        let login_id = LoginId::new(format!("race-{user_id}")).unwrap();
+        sqlx::query("INSERT INTO users (id, login_id, display_name, status, must_change_password, revision, created_at, updated_at) VALUES ($1, $2, 'Alice', 'active', FALSE, 1, $3, $3)")
+            .bind(user_id.as_uuid()).bind(login_id.as_str()).bind(now.as_offset_date_time())
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_credentials (user_id, password_hash, password_changed_at, failed_login_count, locked_until) VALUES ($1, $2, $3, 0, NULL)")
+            .bind(user_id.as_uuid()).bind(old_hash.expose_phc()).bind(now.as_offset_date_time())
+            .execute(&pool).await.unwrap();
+        // This is the snapshot read by LoginService before its Argon2 await.
+        let snapshot = repo.find_login(&login_id).await.unwrap().unwrap();
+        let mut user = snapshot.user.clone();
+        let mutation = if reset {
+            user.require_password_change(now).unwrap();
+            IdentityMutation::ResetPassword {
+                user,
+                credential: Credential::new(user_id, new_hash.clone(), now),
+            }
+        } else {
+            user.disable(now).unwrap();
+            IdentityMutation::StoreUserStatus { user }
+        };
+        orbisync_application::IdentityAdministrationStore::apply(
+            &admin,
+            mutation,
+            IdentityAuditEvent {
+                occurred_at: now,
+                actor_id: Some(user_id),
+                action: "test.administration",
+                resource_id: Some(user_id.to_string()),
+                request_id: RequestId::new(format!("req_{}", Uuid::now_v7())).unwrap(),
+                succeeded: true,
+            },
+        )
+        .await
+        .unwrap();
+        // The reset/disable is fully committed before the stale login tries to
+        // persist, including any rehash computed from its old password.
+        let session = session_record(user_id, now, ts(NOW_MS + HOUR_MS));
+        let refresh = refresh_record(now, ts(NOW_MS + HOUR_MS), u8::from(reset));
+        let audit = audit(now, user_id);
+        assert_eq!(
+            repo.reset_login_success(
+                user_id,
+                0,
+                None,
+                snapshot.credential.password_hash(),
+                now,
+                Some(old_hash.clone()),
+            )
+            .await,
+            Err(IdentityPortError::Conflict),
+            "compatibility authentication must also reject a stale verified credential"
+        );
+        let result = login
+            .commit_success(LoginCommit {
+                user_id,
+                session: &session,
+                refresh: &refresh,
+                audit: &audit,
+                expected_failed_count: 0,
+                expected_locked_until: None,
+                expected_password_hash: snapshot.credential.password_hash(),
+                new_password_hash: Some(&old_hash),
+            })
+            .await;
+        assert_eq!(result, Err(IdentityPortError::Conflict));
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM auth_sessions WHERE user_id = $1")
+                .bind(user_id.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "stale authentication must not insert a session");
+        if reset {
+            assert_eq!(
+                repo.find_account(user_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .credential
+                    .password_hash(),
+                &new_hash
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_disabled_external_subject_cannot_commit_another_session() {
+    use orbisync_application::{
+        IdentityAuditEvent, IdentityMutation, IdentityPortError, IdentityRepository,
+    };
+    let Some(pool) = pool().await else { return };
+    let _guard = db_guard().lock().await;
+    clean(&pool).await;
+    let now = ts(NOW_MS);
+    let user_id = UserId::generate();
+    let user = NewSubjectUser {
+        login_id: LoginId::for_generated_subject(AuthMethod::External, user_id).unwrap(),
+        display_name: "External".into(),
+        kind: UserKind::External,
+        created_at: now,
+    };
+    let external = ExternalIdentityRecord {
+        issuer: "https://idp.test".into(),
+        subject: "alice".into(),
+        created_at: now,
+    };
+    let login = PgLoginStore::new(pool.clone());
+    let session = session_record(user_id, now, ts(NOW_MS + HOUR_MS));
+    let refresh = refresh_record(now, ts(NOW_MS + HOUR_MS), 7);
+    let audit = audit(now, user_id);
+    login
+        .commit_subject_success(SubjectCommit {
+            user_id,
+            new_user: Some(&user),
+            grant_roles: &[],
+            ephemeral: None,
+            external: Some(&external),
+            session: &session,
+            refresh: &refresh,
+            audit: &audit,
+        })
+        .await
+        .unwrap();
+    let repo = orbisync_storage_postgres::PgIdentityRepository::new(pool.clone());
+    let mut stored = repo.find_user(user_id).await.unwrap().unwrap();
+    assert!(repo.find_account(user_id).await.unwrap().is_none());
+    stored.disable(now).unwrap();
+    orbisync_application::IdentityAdministrationStore::apply(
+        &orbisync_storage_postgres::IdentityAdministrationStore::new(pool.clone()),
+        IdentityMutation::StoreUserStatus { user: stored },
+        IdentityAuditEvent {
+            occurred_at: now,
+            actor_id: Some(user_id),
+            action: "user.disabled",
+            resource_id: Some(user_id.to_string()),
+            request_id: RequestId::new(format!("req_{}", Uuid::now_v7())).unwrap(),
+            succeeded: true,
+        },
+    )
+    .await
+    .unwrap();
+    let replacement_session = session_record(user_id, now, ts(NOW_MS + HOUR_MS));
+    let replacement_refresh = refresh_record(now, ts(NOW_MS + HOUR_MS), 8);
+    assert_eq!(
+        login
+            .commit_subject_success(SubjectCommit {
+                user_id,
+                new_user: None,
+                grant_roles: &[],
+                ephemeral: None,
+                external: Some(&external),
+                session: &replacement_session,
+                refresh: &replacement_refresh,
+                audit: &audit,
+            })
+            .await,
+        Err(IdentityPortError::NotFound)
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM auth_sessions WHERE user_id = $1")
+        .bind(user_id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(
+        repo.find_session(session.id).await.unwrap().is_none(),
+        "disabled users must not authenticate"
+    );
 }

@@ -223,6 +223,7 @@ impl IdentityRepository for FailingSaveCredentialRepo {
         user_id: orbisync_domain::UserId,
         expected_failed_count: u32,
         expected_locked_until: Option<Timestamp>,
+        expected_password_hash: &orbisync_domain::PasswordHash,
         now: Timestamp,
         new_password_hash: Option<orbisync_domain::PasswordHash>,
     ) -> Result<bool, IdentityPortError> {
@@ -237,6 +238,7 @@ impl IdentityRepository for FailingSaveCredentialRepo {
                 user_id,
                 expected_failed_count,
                 expected_locked_until,
+                expected_password_hash,
                 now,
                 new_password_hash,
             )

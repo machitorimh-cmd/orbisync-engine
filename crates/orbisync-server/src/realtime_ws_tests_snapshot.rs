@@ -892,45 +892,48 @@
                 visibility, requester: owner, permissions: WorldPermissions::all(),
             }), CommandOutcome::Applied { .. }));
         }
+        let registry = Arc::new(RuntimeRegistry::new());
+        registry.insert(instance, actor).unwrap();
+        let apply = |command| registry.inner().lock().unwrap().get_mut(&instance).unwrap().handle(command);
         let state = Arc::new(RealtimeState::builder(
-            orbisync_config::Config::default().realtime, Arc::new(RuntimeRegistry::new()),
+            orbisync_config::Config::default().realtime, registry.clone(),
             Arc::new(DeliveryRegistry::new()), Arc::new(orbisync_domain::SystemClock::new()),
         ).build());
         let stale = EntityId::generate();
         let sink = RealtimeDeliverySink::new(state, instance, Vec3::new(0.0, 0.0, 0.0).unwrap(), owner, None,
             std::collections::HashMap::from([(b, true), (stale, true)]));
-        let before = actor.interest_views();
+        let before = registry.interest_views(instance).unwrap();
         assert_eq!(sink.enqueue(&n3_make_payload(a, 1, 29.0), Reliability::LatestWins, Some(&before)).delivered, 1);
         assert!(!sink.filter.lock().unwrap().subscribed.contains_key(&stale));
-        assert!(matches!(actor.handle(InstanceCommand::UpdateTransform {
+        assert!(matches!(apply(InstanceCommand::UpdateTransform {
             entity_id: a, transform: n3_make_entity(a, instance, 31.0).transform().unwrap(),
             expected_revision: orbisync_domain::Revision::from_u64(1), user_id: owner,
             now: orbisync_domain::Timestamp::from_unix_millis(1_000).unwrap(), permissions: WorldPermissions::all(),
         }), CommandOutcome::Applied { .. }));
-        let moved = actor.interest_views();
+        let moved = registry.interest_views(instance).unwrap();
         assert!(std::sync::Weak::ptr_eq(&before.membership_token(), &moved.membership_token()));
         assert_eq!(sink.enqueue(&n3_make_payload(a, 2, 31.0), Reliability::LatestWins, Some(&moved)).delivered, 1, "31m must retain subscription across a new snapshot");
         assert_eq!(sink.filter.lock().unwrap().subscribed.get(&b), Some(&true));
-        assert!(matches!(actor.handle(InstanceCommand::DeleteEntity {
+        assert!(matches!(apply(InstanceCommand::DeleteEntity {
             command_id: None, entity_id: b, expected_revision: orbisync_domain::Revision::from_u64(1),
             requester: owner, permissions: WorldPermissions::all(),
         }), CommandOutcome::Applied { .. }));
-        assert_eq!(sink.enqueue(&n3_make_payload(a, 3, 31.0), Reliability::LatestWins, Some(&actor.interest_views())).delivered, 1);
+        assert_eq!(sink.enqueue(&n3_make_payload(a, 3, 31.0), Reliability::LatestWins, Some(&registry.interest_views(instance).unwrap())).delivered, 1);
         assert!(!sink.filter.lock().unwrap().subscribed.contains_key(&b));
-        let old_owner = actor.interest_views();
+        let old_owner = registry.interest_views(instance).unwrap();
         assert_eq!(sink.enqueue(&n3_make_payload(private, 1, 0.0), Reliability::LatestWins, Some(&old_owner)).delivered, 1);
         let next_owner = UserId::generate();
-        actor.handle(InstanceCommand::Join {
+        apply(InstanceCommand::Join {
             presence_id: PresenceId::generate(), user_id: next_owner,
             instance_id: instance, capacity: 10,
         });
-        assert!(matches!(actor.handle(InstanceCommand::TransferOwnership {
+        assert!(matches!(apply(InstanceCommand::TransferOwnership {
             command_id: None, entity_id: private, new_owner: Some(next_owner),
             expected_revision: orbisync_domain::Revision::from_u64(1),
             now: orbisync_domain::Timestamp::from_unix_millis(2_000).unwrap(), requester: owner,
             permissions: WorldPermissions::all(),
         }), CommandOutcome::Applied { .. }));
-        let new_owner = actor.interest_views();
+        let new_owner = registry.interest_views(instance).unwrap();
         assert!(std::sync::Weak::ptr_eq(&old_owner.membership_token(), &new_owner.membership_token()));
         assert_eq!(sink.enqueue(&n3_make_payload(private, 2, 0.0), Reliability::LatestWins, Some(&new_owner)).filtered, 1, "unchanged membership must not cache old authorization");
     }

@@ -349,27 +349,13 @@ async fn handle_socket(
                         {
                             if let Some(evicted) = state.resume_store.evict_oldest_for_instance(iid)
                             {
-                                let leave_result = state
-                                    .registry
-                                    .submit(
-                                        iid,
-                                        InstanceCommand::Leave {
-                                            presence_id: evicted.presence_id,
-                                        },
-                                    )
-                                    .await;
-                                if let Err(error) = leave_result {
-                                    tracing::warn!(
-                                        event = "realtime.resume_binding_leave_failed",
-                                        instance_id = %iid,
-                                        error = ?error,
-                                    );
-                                }
-                                tracing::info!(
+                                if state.release_resume_membership(&evicted).await {
+                                    tracing::info!(
                                     event = "realtime.resume_binding_evicted",
                                     instance_id = %iid,
                                     "evicted a grace-held presence to admit a live member"
-                                );
+                                    );
+                                }
                                 result = match tracing::Instrument::instrument(
                                     state.registry.submit(
                                         iid,
@@ -404,6 +390,7 @@ async fn handle_socket(
                             delivery: Arc::clone(&state.delivery),
                             instance_id: iid,
                             presence: pres,
+                            epoch: 0,
                             resume_store: Arc::clone(&state.resume_store),
                         });
                         // W-18: issue server-stored resume token (D-23, D-24), never logged.
@@ -412,6 +399,7 @@ async fn handle_socket(
                             Arc::clone(&state), iid, viewer_pos, user, viewer_roles.clone(),
                             std::collections::HashMap::new(),
                         ));
+                        sink.bind_presence(pres, 0);
                         sink.begin_snapshot();
                         let registration = state.delivery.register_sink(iid, Arc::clone(&sink) as Arc<dyn DeliverySink>);
                         let Some(read) = state.registry.read_snapshot(iid).await else { return; };
@@ -782,15 +770,21 @@ async fn handle_socket(
                                 payload, Some(vp), Some(user), &state.interest_grid,
                                 &read.interest_views, viewer_roles.as_deref(), &mut replay_subscribed,
                             )).collect();
+                        // The publication lock fences in-flight old-socket work.
+                        // Claim the next generation before releasing it; stale
+                        // commands and stale socket cleanup then fail ownership.
+                        if !read.members.contains(&(binding.presence_id, user)) { return; }
+                        let Some((new_token, epoch)) = state.resume_store.rebind(&binding) else { return; };
+                        sink.bind_presence(binding.presence_id, epoch);
+                        presence_guard_inner = Some(PresenceGuard {
+                            delivery: Arc::clone(&state.delivery),
+                            instance_id: iid,
+                            presence: binding.presence_id,
+                            epoch,
+                            resume_store: Arc::clone(&state.resume_store),
+                        });
                         drop(publication_guard);
                         state.metrics_recorder.incr(Counter::ResumeSuccessTotal);
-                        let new_token = state.resume_store.issue(
-                            user,
-                            iid,
-                            binding.presence_id,
-                            binding.epoch.wrapping_add(1),
-                            binding.last_revision,
-                        );
                         let accepted = orbisync_protocol::v1::ResumeAccepted {
                             presence_id: binding.presence_id.to_string(),
                             current_revision: current.as_u64(),
@@ -848,12 +842,6 @@ async fn handle_socket(
                         final_instance_id = iid;
                         final_world_id = world_id;
                         final_presence = binding.presence_id;
-                        presence_guard_inner = Some(PresenceGuard {
-                            delivery: Arc::clone(&state.delivery),
-                            instance_id: iid,
-                            presence: binding.presence_id,
-                            resume_store: Arc::clone(&state.resume_store),
-                        });
                         break;
                     }
                 }

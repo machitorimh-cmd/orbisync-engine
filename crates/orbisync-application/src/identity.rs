@@ -246,6 +246,15 @@ pub trait IdentityRepository: Send + Sync + 'static {
         user_id: UserId,
     ) -> Result<Option<LoginAccount>, IdentityPortError>;
 
+    /// Loads a user independently of whether it has a local password credential.
+    /// Credential-less adapters must override the account-only default.
+    async fn find_user(&self, user_id: UserId) -> Result<Option<User>, IdentityPortError> {
+        Ok(self
+            .find_account(user_id)
+            .await?
+            .map(|account| account.user))
+    }
+
     /// Persists login failure/success state.
     async fn save_credential(&self, credential: &Credential) -> Result<(), IdentityPortError>;
 
@@ -276,11 +285,15 @@ pub trait IdentityRepository: Send + Sync + 'static {
     /// predicate is checked atomically at `UPDATE` time. Returns `true`
     /// when the row was updated, `false` when a concurrent modification
     /// prevented the reset (the login still succeeds).
+    /// A disabled user or changed `expected_password_hash` returns `Conflict`
+    /// instead: callers must refuse that stale authentication. The active-state
+    /// and credential checks must serialize with reset/change/disable.
     async fn reset_login_success(
         &self,
         user_id: UserId,
         expected_failed_count: u32,
         expected_locked_until: Option<Timestamp>,
+        expected_password_hash: &orbisync_domain::PasswordHash,
         now: Timestamp,
         new_password_hash: Option<orbisync_domain::PasswordHash>,
     ) -> Result<bool, IdentityPortError>;

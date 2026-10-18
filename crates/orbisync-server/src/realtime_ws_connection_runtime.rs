@@ -345,6 +345,7 @@ async fn run_connected_socket(
                 }
             }
             msg = socket.recv() => {
+                if delivery_sink.is_closed() { break; }
                 let Some(Ok(msg)) = msg else { break; };
                 let bytes = match msg {
                     Message::Binary(b) => b,
@@ -704,8 +705,18 @@ async fn run_connected_socket(
                 let message_id_for_payload = env.message_id.clone();
                 // Serialize publication and snapshot handoff within this room.
                 let mut _publication_guard = Some(publication_lock.lock().await);
+                if delivery_sink.is_closed() { break; }
                 match env.payload.take() {
                     Some(envelope::Payload::DomainEvent(event)) => {
+                        let now = state.clock.now();
+                        if !is_session_still_active(state.identity_repository.as_deref(), session_id, now).await
+                            || !ephemeral_participation_allowed(state.ephemeral_scope.as_deref(), user, world_id.as_uuid(), now).await {
+                            send_error(&mut socket, "NOT_AUTHORIZED", "current participation required".into(),
+                                message_id_for_payload, handshake.negotiated_minor, next_sequence,
+                                state.clock.as_ref(), &instance_id.to_string()).await;
+                            next_sequence += 1;
+                            continue;
+                        }
                         match publish_client_event(
                             &state, instance_id, &env.instance_id, user, final_presence,
                             event, handshake.negotiated_minor,
@@ -1508,6 +1519,7 @@ async fn run_connected_socket(
                                         drop(_publication_guard.take());
                                         let decision = gate.validate(&registration, &request).await;
                                         _publication_guard = Some(publication_lock.lock().await);
+                                        if delivery_sink.is_closed() { break; }
                                         match decision {
                                             PreCommitDecision::Deny { reason } => {
                                                 send_error(

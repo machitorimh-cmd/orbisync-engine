@@ -355,22 +355,36 @@ impl PgExtensionOutboxStore {
         })
     }
 
-    async fn append(&self, event: ExtensionEvent) -> Result<Uuid, StorageError> {
-        let event_id = Uuid::now_v7();
+    async fn append(
+        &self,
+        event_id: Uuid,
+        event: ExtensionEvent,
+    ) -> Result<Uuid, ApplicationError> {
         if !self.should_persist() {
             return Ok(event_id);
         }
         let created_at = time::OffsetDateTime::now_utc();
-        sqlx::query(
-            "INSERT INTO outbox_events (id, event_id, owner_module, event_type, event_kind, payload, created_at, available_at) VALUES ($1, $1, 'extensions', $2, $2, $3, $4, $4)",
+        let inserted: Option<Uuid> = sqlx::query_scalar(
+            "INSERT INTO outbox_events (id, event_id, owner_module, event_type, event_kind, payload, created_at, available_at) \
+             VALUES ($1, $1, 'extensions', $2, $2, $3, $4, $4) \
+             ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id \
+             WHERE outbox_events.owner_module = 'extensions' \
+               AND outbox_events.event_kind = EXCLUDED.event_kind \
+               AND outbox_events.payload = EXCLUDED.payload RETURNING event_id",
         )
         .bind(event_id)
         .bind(event.kind())
         .bind(event.payload())
         .bind(created_at)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(StorageError::Database)?;
+        .map_err(|error| ApplicationError::port_failure(error.to_string()))?;
+        if inserted.is_none() {
+            return Err(ApplicationError::new(
+                ApplicationErrorKind::Conflict,
+                "extension event identifier already belongs to a different event",
+            ));
+        }
         Ok(event_id)
     }
 }
@@ -378,9 +392,15 @@ impl PgExtensionOutboxStore {
 #[async_trait::async_trait]
 impl ExtensionOutboxStore for PgExtensionOutboxStore {
     async fn append_event(&self, event: ExtensionEvent) -> Result<Uuid, ApplicationError> {
-        self.append(event).await.map_err(|error| {
-            ApplicationError::new(ApplicationErrorKind::PortFailure, error.to_string())
-        })
+        self.append(Uuid::now_v7(), event).await
+    }
+
+    async fn append_event_with_id(
+        &self,
+        event_id: Uuid,
+        event: ExtensionEvent,
+    ) -> Result<Uuid, ApplicationError> {
+        self.append(event_id, event).await
     }
 }
 

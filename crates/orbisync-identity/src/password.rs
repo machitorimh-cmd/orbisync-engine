@@ -275,12 +275,21 @@ impl PasswordService {
         .map_err(|_| PasswordError::Unavailable)?
     }
 
-    /// Returns whether a stored Argon2id hash uses older parameters.
+    /// Returns whether a stored hash differs from the configured Argon2id profile.
     #[must_use]
-    pub fn needs_rehash(password_hash: &PasswordHash) -> bool {
-        !password_hash
-            .expose_phc()
-            .starts_with("$argon2id$v=19$m=65536,t=3,p=1$")
+    pub fn needs_rehash(&self, password_hash: &PasswordHash) -> bool {
+        let Ok(parsed) = ParsedHash::new(password_hash.expose_phc()) else {
+            return true;
+        };
+        let Ok(params) = Params::try_from(&parsed) else {
+            return true;
+        };
+        parsed.algorithm.as_str() != "argon2id"
+            || parsed.version != Some(u32::from(Version::V0x13))
+            || params.m_cost() != self.memory_kib
+            || params.t_cost() != self.iterations
+            || params.p_cost() != self.parallelism
+            || parsed.hash.is_none_or(|hash| hash.len() != OUTPUT_LENGTH)
     }
 
     /// Rehashes an already authenticated password with current parameters.
@@ -402,13 +411,13 @@ mod tests {
     fn outdated_parameters_are_detected_and_rehashed() {
         let old = orbisync_domain::PasswordHash::new("$argon2id$v=19$m=8192,t=1,p=1$c2FsdA$aGFzaA")
             .expect("valid PHC shape");
-        assert!(PasswordService::needs_rehash(&old));
         let service = PasswordService::new(PasswordPolicy::new(Vec::new())).expect("startup");
+        assert!(service.needs_rehash(&old));
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let current = runtime
             .block_on(service.rehash_existing(SecretString::new("Cedar!Lake7-Comet")))
             .expect("rehash");
-        assert!(!PasswordService::needs_rehash(&current));
+        assert!(!service.needs_rehash(&current));
     }
 
     #[test]
@@ -443,6 +452,39 @@ mod tests {
         assert!(
             hash.expose_phc()
                 .starts_with("$argon2id$v=19$m=8192,t=1,p=1$")
+        );
+        assert!(!service.needs_rehash(&hash));
+    }
+
+    #[tokio::test]
+    async fn rehash_tracks_configured_parameters_and_stabilizes_after_upgrade() {
+        let old = PasswordService::new(PasswordPolicy::new(Vec::new())).expect("old defaults");
+        let current =
+            PasswordService::new_with_argon2(PasswordPolicy::new(Vec::new()), 65_536, 4, 1)
+                .expect("stronger configuration");
+        let password = SecretString::new("Cedar!Lake7-Comet");
+        let old_hash = old.hash(password.clone()).await.expect("old hash");
+        assert!(!old.needs_rehash(&old_hash));
+        assert!(current.needs_rehash(&old_hash));
+        assert!(
+            current
+                .verify(password.clone(), old_hash)
+                .await
+                .expect("verify old parameters")
+        );
+        let upgraded = current
+            .rehash_existing(password.clone())
+            .await
+            .expect("upgrade");
+        assert!(
+            !current.needs_rehash(&upgraded),
+            "upgraded credentials must not rehash on every login"
+        );
+        assert!(
+            current
+                .verify(password, upgraded)
+                .await
+                .expect("verify upgraded")
         );
     }
 

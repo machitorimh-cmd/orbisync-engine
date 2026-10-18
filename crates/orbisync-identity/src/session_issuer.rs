@@ -210,7 +210,12 @@ impl SessionIssuer {
             })
             .await
             .map_err(|error| {
-                if subject.external.is_some()
+                if error == orbisync_application::IdentityPortError::NotFound {
+                    ApplicationError::new(
+                        orbisync_application::ApplicationErrorKind::Unauthenticated,
+                        "authentication failed",
+                    )
+                } else if subject.external.is_some()
                     && error == orbisync_application::IdentityPortError::Conflict
                 {
                     ApplicationError::new(

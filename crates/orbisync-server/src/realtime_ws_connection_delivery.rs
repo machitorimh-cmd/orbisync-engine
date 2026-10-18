@@ -65,6 +65,7 @@ struct DeliveryFilterState {
     snapshot_revision: Option<u64>,
     raw_snapshot_messages: std::collections::HashMap<String, Vec<orbisync_world_runtime::actor::EntityInterestView>>,
     membership: std::sync::Weak<()>,
+    connection_owner: Option<(PresenceId, u64)>,
 }
 
 /// Connection-owned delivery handoff.
@@ -107,6 +108,7 @@ impl RealtimeDeliverySink {
                 snapshot_revision: None,
                 raw_snapshot_messages: std::collections::HashMap::new(),
                 membership: std::sync::Weak::new(),
+                connection_owner: None,
             }),
             notify: Arc::new(Notify::new()),
             closed: AtomicBool::new(false),
@@ -115,6 +117,10 @@ impl RealtimeDeliverySink {
 
     fn queue(&self) -> Arc<Mutex<OutboundQueue>> {
         Arc::clone(&self.queue)
+    }
+
+    fn bind_presence(&self, presence: PresenceId, epoch: u64) {
+        self.filter.lock().unwrap_or_else(|e| e.into_inner()).connection_owner = Some((presence, epoch));
     }
 
     /// Register this sink before reading a snapshot. During handoff the single
@@ -142,7 +148,7 @@ impl RealtimeDeliverySink {
     /// Called before writing queued data. The boundary also discards late
     /// broadcasts committed before the snapshot but published after it.
     fn prepare_delivery(&self, bytes: &[u8]) -> Option<Envelope> {
-        if self.closed.load(Ordering::Acquire) { return None; }
+        if self.is_closed() { return None; }
         let env = decode_envelope(bytes).ok()?;
         let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
         let raw = filter.raw_snapshot_messages.remove(&env.message_id);
@@ -303,7 +309,7 @@ impl DeliverySink for RealtimeDeliverySink {
         _reliability: Reliability,
         views: Option<&orbisync_world_runtime::InterestSnapshot>,
     ) -> SinkOutcome {
-        if self.closed.load(Ordering::Acquire) {
+        if self.is_closed() {
             return SinkOutcome { disconnected_slow_consumer: 1, ..SinkOutcome::default() };
         }
         let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
@@ -389,10 +395,15 @@ impl DeliverySink for RealtimeDeliverySink {
             viewer_roles.as_deref(),
             &mut filter.subscribed,
         );
-        let membership = views.membership_token();
-        if !std::sync::Weak::ptr_eq(&filter.membership, &membership) {
-            filter.subscribed.retain(|id, _| views.contains(*id));
-            filter.membership = membership;
+        // Publication views describe only this commit (often one entity), not
+        // the room's complete membership. Prune using the authoritative full
+        // index so an unrelated update cannot erase hysteresis history.
+        if let Some(membership_views) = self.state.registry.interest_views(self.instance_id) {
+            let membership = membership_views.membership_token();
+            if !std::sync::Weak::ptr_eq(&filter.membership, &membership) {
+                filter.subscribed.retain(|id, _| membership_views.contains(*id));
+                filter.membership = membership;
+            }
         }
         let Some(filtered) = filtered else {
             return SinkOutcome { filtered: 1, ..SinkOutcome::default() };
@@ -403,5 +414,7 @@ impl DeliverySink for RealtimeDeliverySink {
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+            || self.filter.lock().unwrap_or_else(|e| e.into_inner()).connection_owner
+                .is_some_and(|(presence, epoch)| !self.state.resume_store.is_current(presence, epoch))
     }
 }

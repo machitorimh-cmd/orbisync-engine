@@ -231,75 +231,54 @@ fn collect_extension_events(
     pending.extend(actor.drain_outbox());
 }
 
-/// Persists a coordinator-drained batch through the existing application port.
+/// Persists effects in order, retaining each stable identifier until acknowledged.
+/// Simulation uses an independent worker; backoff cannot stop actor ticks.
 async fn persist_extension_events(store: &dyn ExtensionOutboxStore, events: Vec<ExtensionEvent>) {
     for event in events {
-        if let Err(error) = store.append_event(event).await {
-            tracing::warn!(
-                event = "extension.outbox_append_failed",
-                error = %error,
-                detail = "drained extension event could not be persisted"
-            );
+        let event_id = Uuid::now_v7();
+        let mut delay = std::time::Duration::from_millis(50);
+        loop {
+            match store.append_event_with_id(event_id, event.clone()).await {
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::warn!(event = "extension.outbox_append_failed", %event_id,
+                        error = %error, "retaining extension event for ordered retry");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(2));
+                }
+            }
         }
     }
 }
 
-/// Persists a coordinator-drained batch of entity/component writes (HIGH-002).
-///
-/// Drained once per instance tick (`InstanceHandle::tick`,
-/// `reap_idle_instance`), so writes are bounded by tick cadence rather than
-/// issued once per command (`CODE_REVIEW.md` HIGH-002 recommended fix).
-///
-/// A failure here is treated like `persist_extension_events` in that
-/// transient state keeps running rather than blocking on retries
-/// (`state-and-runtime.md` §3.5: persistence port failure -> ephemeral state
-/// continues, persistence retries). It is not treated identically, though: an
-/// entity write is heavier than a missed webhook delivery, since a
-/// durable row that never lands is exactly the HIGH-002 failure mode this
-/// wiring exists to close. So failures are also counted, giving an operator
-/// something to alert on that extension delivery misses do not need.
+/// Applies entity effects in order, retrying uncertain commits with the same ID.
+/// The storage receipt and entity/audit mutation commit atomically. Receipt
+/// cleanup after success is best-effort; it must never restart an applied write.
 async fn persist_entity_events(
     store: &dyn PersistentEntityStore,
     metrics: &dyn MetricsRecorder,
     events: Vec<EntityPersistenceEvent>,
 ) {
     for event in events {
-        let result = match event {
-            EntityPersistenceEvent::Spawned(entity) => store.spawn(entity).await,
-            EntityPersistenceEvent::OwnershipTransferred { entity, audit } => {
-                store.transfer_ownership(entity, audit).await
+        let event_id = Uuid::now_v7();
+        let mut delay = std::time::Duration::from_millis(50);
+        loop {
+            match store.apply_event(event_id, event.clone()).await {
+                Ok(()) => {
+                    if let Err(error) = store.acknowledge_event(event_id).await {
+                        tracing::warn!(event = "persistence.receipt_cleanup_failed", %event_id,
+                            error = %error);
+                    }
+                    break;
+                }
+                Err(error) => {
+                    metrics.incr(Counter::EntityPersistenceFailuresTotal);
+                    tracing::warn!(event = "persistence.entity_write_failed", %event_id,
+                        error = %error, "retaining entity effect for ordered retry");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(2));
+                }
             }
-            EntityPersistenceEvent::Deleted {
-                entity_id,
-                instance_id,
-            } => store.delete(entity_id, instance_id).await,
-            EntityPersistenceEvent::ComponentUpserted {
-                entity_id,
-                instance_id,
-                revision,
-                updated_at,
-                component_key,
-                payload,
-            } => {
-                store
-                    .upsert_component(
-                        entity_id,
-                        instance_id,
-                        revision,
-                        updated_at,
-                        component_key,
-                        payload,
-                    )
-                    .await
-            }
-        };
-        if let Err(error) = result {
-            metrics.incr(Counter::EntityPersistenceFailuresTotal);
-            tracing::warn!(
-                event = "persistence.entity_write_failed",
-                error = %error,
-                detail = "drained entity persistence event could not be written; transient state continues"
-            );
         }
     }
 }
@@ -2748,6 +2727,68 @@ mod tests {
         calls: Mutex<Vec<String>>,
     }
 
+    #[derive(Default)]
+    struct UncertainExtensionStore {
+        attempts: Mutex<Vec<Uuid>>,
+        events: Mutex<Vec<(Uuid, ExtensionEvent)>>,
+    }
+
+    #[async_trait]
+    impl ExtensionOutboxStore for UncertainExtensionStore {
+        async fn append_event(&self, event: ExtensionEvent) -> Result<Uuid, ApplicationError> {
+            self.append_event_with_id(Uuid::now_v7(), event).await
+        }
+        async fn append_event_with_id(
+            &self,
+            event_id: Uuid,
+            event: ExtensionEvent,
+        ) -> Result<Uuid, ApplicationError> {
+            self.attempts.lock().unwrap().push(event_id);
+            let mut events = self.events.lock().unwrap();
+            if events.iter().any(|(id, _)| *id == event_id) {
+                return Ok(event_id);
+            }
+            events.push((event_id, event));
+            Err(ApplicationError::port_failure(
+                "outbox commit acknowledgement lost",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_effect_retries_preserve_identity_order_and_do_not_duplicate() {
+        let instance_id = InstanceId::generate();
+        let entity_id = EntityId::generate();
+        let events = vec![
+            ExtensionEvent::EntitySpawned {
+                instance_id,
+                entity_id,
+                owner: None,
+            },
+            ExtensionEvent::EntityDeleted {
+                instance_id,
+                entity_id,
+            },
+        ];
+        let store = UncertainExtensionStore::default();
+        persist_extension_events(&store, events.clone()).await;
+        let attempts = store.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 4);
+        assert_eq!(attempts[0], attempts[1]);
+        assert_eq!(attempts[2], attempts[3]);
+        assert_ne!(attempts[0], attempts[2]);
+        assert_eq!(
+            store
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, e)| e.clone())
+                .collect::<Vec<_>>(),
+            events
+        );
+    }
+
     #[async_trait]
     impl PersistentEntityStore for RecordingPersistentEntityStore {
         async fn spawn(&self, entity: orbisync_domain::Entity) -> Result<(), ApplicationError> {
@@ -2830,10 +2871,33 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FailingPersistentEntityStore;
+    struct FailingPersistentEntityStore {
+        attempts: Mutex<Vec<Uuid>>,
+        committed: Mutex<Vec<Uuid>>,
+        acknowledged: Mutex<Vec<Uuid>>,
+    }
 
     #[async_trait]
     impl PersistentEntityStore for FailingPersistentEntityStore {
+        async fn apply_event(
+            &self,
+            event_id: Uuid,
+            _event: EntityPersistenceEvent,
+        ) -> Result<(), ApplicationError> {
+            self.attempts.lock().unwrap().push(event_id);
+            let mut committed = self.committed.lock().unwrap();
+            if committed.contains(&event_id) {
+                return Ok(());
+            }
+            committed.push(event_id);
+            Err(ApplicationError::port_failure(
+                "commit acknowledgement lost",
+            ))
+        }
+        async fn acknowledge_event(&self, event_id: Uuid) -> Result<(), ApplicationError> {
+            self.acknowledged.lock().unwrap().push(event_id);
+            Ok(())
+        }
         async fn spawn(&self, _entity: orbisync_domain::Entity) -> Result<(), ApplicationError> {
             Err(ApplicationError::port_failure("simulated store outage"))
         }
@@ -3076,9 +3140,17 @@ mod tests {
         let events = actor.drain_persistence_batch();
         assert_eq!(events.len(), 1);
 
-        let store = FailingPersistentEntityStore;
+        let store = FailingPersistentEntityStore::default();
         let metrics = RecordingFailureMetrics::default();
         persist_entity_events(&store, &metrics, events).await;
+        let attempts = store.attempts.lock().unwrap().clone();
+        assert_eq!(attempts.len(), 2, "uncertain commit must be retried");
+        assert_eq!(
+            attempts[0], attempts[1],
+            "retry must preserve effect identity"
+        );
+        assert_eq!(store.committed.lock().unwrap().len(), 1);
+        assert_eq!(*store.acknowledged.lock().unwrap(), vec![attempts[0]]);
         assert_eq!(
             metrics.entity_persistence_failures.load(Ordering::SeqCst),
             1,

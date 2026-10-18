@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use orbisync_application::{
     AUDIT_ACTION_ENTITY_OWNERSHIP_TRANSFERRED, ApplicationError, ApplicationErrorKind,
-    EntityOwnershipTransferAudit, PersistentEntityStore,
+    EntityOwnershipTransferAudit, EntityPersistenceEvent, PersistentEntityStore,
 };
 use orbisync_domain::{
     Entity, EntityId, EntityKind, InstanceId, Quaternion, Revision, RoleId, Timestamp, Transform,
@@ -436,14 +436,13 @@ impl PgPersistentEntityStore {
         }
         Ok(())
     }
-}
-
-#[async_trait::async_trait]
-impl PersistentEntityStore for PgPersistentEntityStore {
-    async fn spawn(&self, entity: Entity) -> Result<(), ApplicationError> {
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        entity: Entity,
+    ) -> Result<(), ApplicationError> {
         let revision = Self::revision_i64(entity.revision())?;
 
-        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
         let inserted = sqlx::query(
             "INSERT INTO persistent_entities \
              (id, instance_id, kind, owner_id, transform, visibility, revision, created_at, updated_at) \
@@ -458,7 +457,7 @@ impl PersistentEntityStore for PgPersistentEntityStore {
         .bind(revision)
         .bind(entity.created_at().as_offset_date_time())
         .bind(entity.updated_at().as_offset_date_time())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await;
 
         if let Err(error) = inserted {
@@ -470,23 +469,17 @@ impl PersistentEntityStore for PgPersistentEntityStore {
             return Err(Self::map_db_err(error));
         }
 
-        Self::insert_components(&entity, &mut tx).await?;
-        tx.commit().await.map_err(Self::map_db_err)
+        Self::insert_components(&entity, tx).await?;
+        Ok(())
     }
 
-    async fn update(&self, entity: Entity) -> Result<(), ApplicationError> {
-        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
-        Self::update_entity_in_transaction(&mut tx, &entity).await?;
-        tx.commit().await.map_err(Self::map_db_err)
-    }
-
-    async fn transfer_ownership(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    async fn transfer_ownership_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entity: Entity,
         audit: EntityOwnershipTransferAudit,
     ) -> Result<(), ApplicationError> {
-        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
-        Self::update_entity_in_transaction(&mut tx, &entity).await?;
+        Self::update_entity_in_transaction(tx, &entity).await?;
 
         let metadata = serde_json::json!({
             "instance_id": entity.instance_id().to_string(),
@@ -506,15 +499,16 @@ impl PersistentEntityStore for PgPersistentEntityStore {
         .bind(entity.id().to_string())
         .bind(request_id)
         .bind(metadata)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(Self::map_db_err)?;
 
-        tx.commit().await.map_err(Self::map_db_err)
+        Ok(())
     }
 
-    async fn upsert_component(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_component_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entity_id: EntityId,
         instance_id: InstanceId,
         revision: Revision,
@@ -524,9 +518,8 @@ impl PersistentEntityStore for PgPersistentEntityStore {
     ) -> Result<(), ApplicationError> {
         let revision_i64 = Self::revision_i64(revision)?;
 
-        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
         Self::advance_revision(
-            &mut tx,
+            tx,
             entity_id,
             instance_id,
             revision_i64,
@@ -542,10 +535,129 @@ impl PersistentEntityStore for PgPersistentEntityStore {
         .bind(entity_id.as_uuid())
         .bind(&component_key)
         .bind(&payload)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(Self::map_db_err)?;
 
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl PersistentEntityStore for PgPersistentEntityStore {
+    async fn apply_event(
+        &self,
+        event_id: Uuid,
+        event: EntityPersistenceEvent,
+    ) -> Result<(), ApplicationError> {
+        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
+        let inserted = sqlx::query(
+            "INSERT INTO runtime_effect_receipts (event_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(Self::map_db_err)?;
+        if inserted.rows_affected() == 0 {
+            return tx.commit().await.map_err(Self::map_db_err);
+        }
+        match event {
+            EntityPersistenceEvent::Spawned(entity) => {
+                Self::spawn_in_transaction(&mut tx, entity).await?;
+            }
+            EntityPersistenceEvent::OwnershipTransferred { entity, audit } => {
+                Self::transfer_ownership_in_transaction(&mut tx, entity, audit).await?;
+            }
+            EntityPersistenceEvent::ComponentUpserted {
+                entity_id,
+                instance_id,
+                revision,
+                updated_at,
+                component_key,
+                payload,
+            } => {
+                Self::upsert_component_in_transaction(
+                    &mut tx,
+                    entity_id,
+                    instance_id,
+                    revision,
+                    updated_at,
+                    component_key,
+                    payload,
+                )
+                .await?;
+            }
+            EntityPersistenceEvent::Deleted {
+                entity_id,
+                instance_id,
+            } => {
+                let deleted = sqlx::query(
+                    "DELETE FROM persistent_entities WHERE id = $1 AND instance_id = $2",
+                )
+                .bind(entity_id.as_uuid())
+                .bind(instance_id.as_uuid())
+                .execute(&mut *tx)
+                .await
+                .map_err(Self::map_db_err)?;
+                if deleted.rows_affected() == 0 {
+                    return Err(Self::not_found());
+                }
+            }
+        }
+        tx.commit().await.map_err(Self::map_db_err)
+    }
+
+    async fn acknowledge_event(&self, event_id: Uuid) -> Result<(), ApplicationError> {
+        sqlx::query("DELETE FROM runtime_effect_receipts WHERE event_id = $1")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Self::map_db_err)?;
+        Ok(())
+    }
+
+    async fn spawn(&self, entity: Entity) -> Result<(), ApplicationError> {
+        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
+        Self::spawn_in_transaction(&mut tx, entity).await?;
+        tx.commit().await.map_err(Self::map_db_err)
+    }
+
+    async fn update(&self, entity: Entity) -> Result<(), ApplicationError> {
+        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
+        Self::update_entity_in_transaction(&mut tx, &entity).await?;
+        tx.commit().await.map_err(Self::map_db_err)
+    }
+
+    async fn transfer_ownership(
+        &self,
+        entity: Entity,
+        audit: EntityOwnershipTransferAudit,
+    ) -> Result<(), ApplicationError> {
+        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
+        Self::transfer_ownership_in_transaction(&mut tx, entity, audit).await?;
+        tx.commit().await.map_err(Self::map_db_err)
+    }
+
+    async fn upsert_component(
+        &self,
+        entity_id: EntityId,
+        instance_id: InstanceId,
+        revision: Revision,
+        updated_at: Timestamp,
+        component_key: String,
+        payload: Vec<u8>,
+    ) -> Result<(), ApplicationError> {
+        let mut tx = self.pool.begin().await.map_err(Self::map_db_err)?;
+        Self::upsert_component_in_transaction(
+            &mut tx,
+            entity_id,
+            instance_id,
+            revision,
+            updated_at,
+            component_key,
+            payload,
+        )
+        .await?;
         tx.commit().await.map_err(Self::map_db_err)
     }
 

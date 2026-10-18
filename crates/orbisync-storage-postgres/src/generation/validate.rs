@@ -26,6 +26,28 @@ mod resource_tests {
 
     #[test]
     fn resource_sqlx_binding_boundary_is_not_cooperative() {
+        // The codec counters are process-wide. Another test can legitimately
+        // observe work during this encoder call, so measure in a child running
+        // only this test rather than compare a shared concurrent snapshot.
+        const CHILD: &str = "ORBISYNC_SQLX_BINDING_EVIDENCE_CHILD";
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            let test_name = format!(
+                "{}::resource_sqlx_binding_boundary_is_not_cooperative",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated encoder measurement failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         // No connection/query/SQL execution: exercise only the pinned driver's
         // public BYTEA encoder to preserve the unresolved R3 boundary evidence.
         let bytes = vec![0u8; 65536];

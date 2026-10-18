@@ -291,3 +291,130 @@ async fn checkpoint_wait_does_not_stop_periodic_ticks() {
     super::mark_instances_draining(&shutdown, &registry).await;
     workers.drain(Duration::from_secs(3)).await;
 }
+
+struct WorkerCheckpointCounter {
+    healthy: InstanceId,
+    saves: AtomicUsize,
+}
+
+#[async_trait]
+impl CheckpointStore for WorkerCheckpointCounter {
+    async fn save_checkpoint(
+        &self,
+        checkpoint: AppCheckpoint,
+    ) -> Result<Vec<orbisync_application::CheckpointSaveReceipt>, ApplicationError> {
+        if checkpoint.instance_id == self.healthy {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(Vec::new())
+    }
+
+    async fn load_latest(&self, _: InstanceId) -> Result<Option<AppCheckpoint>, ApplicationError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn blocked_instance_cannot_hold_other_instances_at_a_maintenance_pass_barrier() {
+    let registry = Arc::new(RuntimeRegistry::new());
+    let blocked = InstanceId::generate();
+    let healthy = InstanceId::generate();
+    let owner = UserId::generate();
+    let blocked_handle = active_worker_instance(&registry, blocked, owner).await;
+    let healthy_handle = active_worker_instance(&registry, healthy, owner).await;
+    let blocked_entity = EntityId::generate();
+    let spawn = |entity_id| InstanceCommand::SpawnEntity {
+        command_id: None,
+        entity_id,
+        kind: EntityKind::Object,
+        owner: Some(owner),
+        transform: None,
+        visibility: VisibilityPolicy::Global,
+        requester: owner,
+        permissions: WorldPermissions::all(),
+    };
+    assert!(matches!(
+        blocked_handle.submit(spawn(blocked_entity)).await.unwrap(),
+        CommandOutcome::Applied { .. }
+    ));
+    let entities = Arc::new(GatedEntityStore {
+        recorded: RecordingPersistentEntityStore::default(),
+        blocked,
+        entered: Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let checkpoints = Arc::new(WorkerCheckpointCounter {
+        healthy,
+        saves: AtomicUsize::new(0),
+    });
+    let metrics = Arc::new(TickCountingMetrics::default());
+    let workers = super::runtime_maintenance::RuntimeWorkers::spawn(
+        worker_services(
+            registry.clone(),
+            entities.clone(),
+            Arc::new(RecordingExtensionStore::default()),
+            checkpoints.clone(),
+            metrics.clone(),
+        ),
+        100,
+        Duration::from_secs(300),
+        1,
+    );
+    tokio::time::timeout(Duration::from_secs(2), entities.entered.notified())
+        .await
+        .expect("blocked instance must enter storage");
+    // Submit each mutation only after its predecessor has persisted. These
+    // cannot all be satisfied by the healthy instance's first drained batch.
+    for _ in 0..3 {
+        let entity = EntityId::generate();
+        assert!(matches!(
+            healthy_handle.submit(spawn(entity)).await.unwrap(),
+            CommandOutcome::Applied { .. }
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if entities
+                    .recorded
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .contains(&format!("spawn:{entity}"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("healthy instance must persist successive batches while its sibling is blocked");
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while checkpoints.saves.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("healthy instance's repeated checkpoints must also progress");
+    assert!(
+        !entities
+            .recorded
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&format!("spawn:{blocked_entity}"))
+    );
+
+    let shutdown = orbisync_server::shutdown::ShutdownState::new();
+    shutdown.begin();
+    super::mark_instances_draining(&shutdown, &registry).await;
+    entities.release.add_permits(1);
+    workers.drain(Duration::from_secs(2)).await;
+    assert!(
+        entities
+            .recorded
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&format!("spawn:{blocked_entity}"))
+    );
+}

@@ -143,7 +143,10 @@ impl LoginService {
         // Success branch: prepare session, refresh token, audit and optional rehash.
         let expected_failed = account.credential.failed_login_count();
         let expected_locked = account.credential.locked_until();
-        let new_hash = if PasswordService::needs_rehash(account.credential.password_hash()) {
+        let new_hash = if self
+            .passwords
+            .needs_rehash(account.credential.password_hash())
+        {
             let upgraded = self
                 .passwords
                 .rehash_existing(password_clone)
@@ -212,13 +215,30 @@ impl LoginService {
             audit: &audit,
             expected_failed_count: expected_failed,
             expected_locked_until: expected_locked,
+            expected_password_hash: account.credential.password_hash(),
             new_password_hash: new_hash.as_ref(),
         };
 
-        self.transactions
-            .commit_success(commit)
-            .await
-            .map_err(|_| ApplicationError::port_failure("login transaction failed"))?;
+        if let Err(error) = self.transactions.commit_success(commit).await {
+            if error == orbisync_application::IdentityPortError::Conflict {
+                // A reset/disable is a failed authentication, not a storage
+                // outage. Record it without modifying the new credential's
+                // counters or persisting the success audit/token material.
+                self.transactions
+                    .record_failure(
+                        None,
+                        LoginAuditEvent {
+                            actor_id: None,
+                            succeeded: false,
+                            ..audit
+                        },
+                    )
+                    .await
+                    .map_err(|_| ApplicationError::port_failure("audit unavailable"))?;
+                return Err(unauthenticated());
+            }
+            return Err(ApplicationError::port_failure("login transaction failed"));
+        }
 
         // Build domain session for the transport response (no persistence left).
         let session = AuthSession::new(session_id, user_id, now, expires_at)

@@ -10,6 +10,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "check": "tsc --noEmit",
+    "test:unit": "node ../../sdk/typescript/node_modules/tsx/dist/cli.mjs --test tests/api-session.test.ts",
     "test:browser": "playwright test"
   },
   "devDependencies": {

@@ -92,25 +92,61 @@ impl RuntimeWorkers {
         let maintenance = tokio::spawn(async move {
             let mut last_checkpoint = Instant::now();
             let mut last_checkpoint_tick = 0_u64;
+            let mut now = SystemClock::new().now();
+            let mut tasks = super::periodic_tasks::PeriodicTasks::new(MAX_CONCURRENT_MAINTENANCE);
             loop {
                 tokio::select! {
                     biased;
                     _ = maintenance_stop.changed() => break,
+                    completion = tasks.join_next(), if tasks.is_running() => {
+                        if let Some(Err(error)) = completion {
+                            tracing::error!(event = "runtime.persistence_job_failed", error = %error);
+                        }
+                    }
                     changed = progress_rx.changed() => {
                         if changed.is_err() { break; }
+                        let progress = *progress_rx.borrow_and_update();
+                        now = progress.now;
+                        // A busy instance retains one coalesced wakeup, including
+                        // any checkpoint request, while its ordered writes retry.
+                        let checkpoint_due = progress.count.saturating_sub(last_checkpoint_tick)
+                            >= checkpoint_interval_ticks.max(1)
+                            || last_checkpoint.elapsed() >= checkpoint_interval;
+                        if checkpoint_due {
+                            last_checkpoint_tick = progress.count;
+                            last_checkpoint = Instant::now();
+                        }
+                        for handle in services.registry.handles() {
+                            tasks.enqueue(Some(handle.instance_id()), super::periodic_tasks::Work {
+                                tick: false,
+                                checkpoint: checkpoint_due,
+                                project: false,
+                            });
+                        }
                     }
                 }
-                let progress = *progress_rx.borrow_and_update();
-                // A busy worker may skip wakeups, so test elapsed ticks rather
-                // than requiring it to observe an exact multiple.
-                let checkpoint_due = progress.count.saturating_sub(last_checkpoint_tick)
-                    >= checkpoint_interval_ticks.max(1)
-                    || last_checkpoint.elapsed() >= checkpoint_interval;
-                if checkpoint_due {
-                    last_checkpoint_tick = progress.count;
-                    last_checkpoint = Instant::now();
+                // Finishing B can immediately schedule B's next drain even when
+                // A is still retrying. The keyed scheduler never overlaps A's
+                // batches and admits at most eight owned batches process-wide.
+                tasks.start_ready(|instance, work| {
+                    let services = Arc::clone(&services);
+                    async move {
+                        if let Some(instance_id) = instance {
+                            services
+                                .run_instance(instance_id, now, work.checkpoint, false)
+                                .await;
+                        }
+                        Vec::new()
+                    }
+                });
+            }
+            // Finish every batch already removed from an actor before another
+            // final drain of that actor. Unstarted coalesced periodic jobs have
+            // no owned effects and are superseded by the final pass below.
+            while let Some(completion) = tasks.join_next().await {
+                if let Err(error) = completion {
+                    tracing::error!(event = "runtime.persistence_job_failed", error = %error);
                 }
-                services.run_pass(progress.now, checkpoint_due, false).await;
             }
             // Admission is closed and actors have been marked draining before
             // shutdown requests this final pass. No overlapping worker can
@@ -170,40 +206,49 @@ impl MaintenanceServices {
     async fn run_pass(&self, now: Timestamp, checkpoint_due: bool, final_pass: bool) {
         let handles = self.registry.handles();
         let mut work = stream::iter(handles)
-            .map(|handle| async move {
-                let instance_id = handle.instance_id();
-                if let Some(effects) = handle.drain_effects().await {
-                    self.persist_effects(effects).await;
-                }
-                if final_pass {
-                    return;
-                }
-                // The same worker owns drains and reaps. A later drain cannot pass
-                // an earlier batch, including effects emitted between drain/reap.
-                if handle.cached_member_count() == 0 && self.delivery.sender_count(instance_id) == 0
-                {
-                    let (events, persistence_events) = super::reap_idle_instance(
-                        Arc::clone(&self.registry),
-                        Arc::clone(&self.delivery),
-                        Arc::clone(&self.checkpoints),
-                        Arc::clone(&self.dedup),
-                        Arc::clone(&self.metrics),
-                        Arc::clone(&self.checkpoint_permits),
-                        instance_id,
-                        now,
-                    )
-                    .await;
-                    self.persist_effects(InstanceEffects {
-                        events,
-                        persistence_events,
-                    })
-                    .await;
-                } else if checkpoint_due {
-                    self.save_checkpoint(instance_id, now).await;
-                }
-            })
+            .map(|handle| self.run_instance(handle.instance_id(), now, checkpoint_due, final_pass))
             .buffer_unordered(MAX_CONCURRENT_MAINTENANCE);
         while work.next().await.is_some() {}
+    }
+
+    async fn run_instance(
+        &self,
+        instance_id: InstanceId,
+        now: Timestamp,
+        checkpoint_due: bool,
+        final_pass: bool,
+    ) {
+        let Some(handle) = self.registry.handle(instance_id) else {
+            return;
+        };
+        if let Some(effects) = handle.drain_effects().await {
+            self.persist_effects(effects).await;
+        }
+        if final_pass {
+            return;
+        }
+        // The same keyed job owns drains and reaps. A later drain cannot pass
+        // an earlier batch, including effects emitted between drain/reap.
+        if handle.cached_member_count() == 0 && self.delivery.sender_count(instance_id) == 0 {
+            let (events, persistence_events) = super::reap_idle_instance(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.delivery),
+                Arc::clone(&self.checkpoints),
+                Arc::clone(&self.dedup),
+                Arc::clone(&self.metrics),
+                Arc::clone(&self.checkpoint_permits),
+                instance_id,
+                now,
+            )
+            .await;
+            self.persist_effects(InstanceEffects {
+                events,
+                persistence_events,
+            })
+            .await;
+        } else if checkpoint_due {
+            self.save_checkpoint(instance_id, now).await;
+        }
     }
 
     async fn save_checkpoint(&self, instance_id: InstanceId, now: Timestamp) {

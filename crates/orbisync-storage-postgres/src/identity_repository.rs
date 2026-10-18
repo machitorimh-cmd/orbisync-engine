@@ -26,6 +26,50 @@ impl PgIdentityRepository {
 
 #[async_trait::async_trait]
 impl IdentityRepository for PgIdentityRepository {
+    async fn find_user(&self, user_id: UserId) -> Result<Option<User>, IdentityPortError> {
+        let row: Option<(String, String, String, bool, i64, OffsetDateTime, OffsetDateTime)> =
+            sqlx::query_as(
+                "SELECT login_id, display_name, status, must_change_password, revision, created_at, updated_at FROM users WHERE id = $1",
+            )
+            .bind(user_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| IdentityPortError::Unavailable)?;
+        let Some((login, display, status, must_change, revision, created, updated)) = row else {
+            return Ok(None);
+        };
+        let role_ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT role_id FROM user_roles WHERE user_id = $1")
+                .bind(user_id.as_uuid())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|_| IdentityPortError::Unavailable)?;
+        let roles = role_ids
+            .into_iter()
+            .map(|id| {
+                orbisync_domain::RoleId::new(id).map_err(|_| IdentityPortError::DataCorruption)
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let status = match status.as_str() {
+            "active" => UserStatus::Active,
+            "disabled" => UserStatus::Disabled,
+            _ => return Err(IdentityPortError::DataCorruption),
+        };
+        Ok(Some(User::reconstitute(
+            user_id,
+            LoginId::new(login).map_err(|_| IdentityPortError::DataCorruption)?,
+            display,
+            status,
+            must_change,
+            roles,
+            Timestamp::from_offset_date_time(created),
+            Timestamp::from_offset_date_time(updated),
+            Revision::from_u64(
+                u64::try_from(revision).map_err(|_| IdentityPortError::DataCorruption)?,
+            ),
+        )))
+    }
+
     async fn find_account(
         &self,
         user_id: UserId,
@@ -243,9 +287,35 @@ impl IdentityRepository for PgIdentityRepository {
         user_id: UserId,
         expected_failed_count: u32,
         expected_locked_until: Option<Timestamp>,
+        expected_password_hash: &PasswordHash,
         now: Timestamp,
         new_password_hash: Option<PasswordHash>,
     ) -> Result<bool, IdentityPortError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| IdentityPortError::Unavailable)?;
+        // Match the login transaction and administrative lock order. Argon2
+        // runs before this transaction; only its verified snapshot is guarded.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id.as_uuid())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| IdentityPortError::Unavailable)?;
+        let current_hash: Option<String> = sqlx::query_scalar(
+            "SELECT password_hash FROM user_credentials WHERE user_id = $1 FOR UPDATE",
+        )
+        .bind(user_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| IdentityPortError::Unavailable)?;
+        if status.as_deref() != Some("active")
+            || current_hash.as_deref() != Some(expected_password_hash.expose_phc())
+        {
+            return Err(IdentityPortError::Conflict);
+        }
         let expected_locked_odt = expected_locked_until.map(|v| v.as_offset_date_time());
         let expected_failed_i32 =
             i32::try_from(expected_failed_count).map_err(|_| IdentityPortError::DataCorruption)?;
@@ -259,7 +329,7 @@ impl IdentityRepository for PgIdentityRepository {
             .bind(expected_locked_odt)
             .bind(hash.expose_phc())
             .bind(pwd_changed)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|_| IdentityPortError::Unavailable)?
         } else {
@@ -269,10 +339,13 @@ impl IdentityRepository for PgIdentityRepository {
             .bind(user_id.as_uuid())
             .bind(expected_failed_i32)
             .bind(expected_locked_odt)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|_| IdentityPortError::Unavailable)?
         };
+        tx.commit()
+            .await
+            .map_err(|_| IdentityPortError::Unavailable)?;
         Ok(rows.rows_affected() == 1)
     }
 
@@ -338,7 +411,7 @@ impl IdentityRepository for PgIdentityRepository {
         session_id: AuthSessionId,
     ) -> Result<Option<AuthSession>, IdentityPortError> {
         let row = sqlx::query_as::<_, (Uuid, Uuid, String, OffsetDateTime, OffsetDateTime, Option<OffsetDateTime>)>(
-            "SELECT id, user_id, status, created_at, expires_at, revoked_at FROM auth_sessions WHERE id = $1",
+            "SELECT s.id, s.user_id, s.status, s.created_at, s.expires_at, s.revoked_at FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.id = $1 AND u.status = 'active'",
         )
         .bind(session_id.as_uuid())
         .fetch_optional(&self.pool)

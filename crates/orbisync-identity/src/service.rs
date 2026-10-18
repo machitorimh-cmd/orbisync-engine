@@ -90,7 +90,10 @@ where
         }
         let expected_failed = account.credential.failed_login_count();
         let expected_locked = account.credential.locked_until();
-        if PasswordService::needs_rehash(account.credential.password_hash()) {
+        if self
+            .passwords
+            .needs_rehash(account.credential.password_hash())
+        {
             let upgraded = self
                 .passwords
                 .rehash_existing(password_for_rehash)
@@ -109,11 +112,12 @@ where
                     account.user.id(),
                     expected_failed,
                     expected_locked,
+                    account.credential.password_hash(),
                     now,
                     Some(upgraded),
                 )
                 .await
-                .map_err(|_| ApplicationError::port_failure("identity repository unavailable"))?;
+                .map_err(authentication_commit_error)?;
         } else {
             // Reason: Same as above – bool indicates predicate match, not success.
             #[allow(clippy::let_underscore_must_use)]
@@ -123,11 +127,12 @@ where
                     account.user.id(),
                     expected_failed,
                     expected_locked,
+                    account.credential.password_hash(),
                     now,
                     None,
                 )
                 .await
-                .map_err(|_| ApplicationError::port_failure("identity repository unavailable"))?;
+                .map_err(authentication_commit_error)?;
         }
         Ok(subject(&account.user))
     }
@@ -145,6 +150,14 @@ fn unauthenticated() -> ApplicationError {
         ApplicationErrorKind::Unauthenticated,
         "authentication failed",
     )
+}
+
+fn authentication_commit_error(error: orbisync_application::IdentityPortError) -> ApplicationError {
+    if error == orbisync_application::IdentityPortError::Conflict {
+        unauthenticated()
+    } else {
+        ApplicationError::port_failure("identity repository unavailable")
+    }
 }
 
 fn password_error(error: PasswordError) -> ApplicationError {
@@ -179,6 +192,7 @@ mod tests {
     struct Repository {
         account: Mutex<Option<LoginAccount>>,
         lookups: Mutex<usize>,
+        before_success: Mutex<Option<LoginAccount>>,
     }
 
     #[async_trait]
@@ -242,11 +256,20 @@ mod tests {
             _user_id: UserId,
             expected_failed_count: u32,
             expected_locked_until: Option<Timestamp>,
+            expected_password_hash: &PasswordHash,
             _now: Timestamp,
             new_password_hash: Option<PasswordHash>,
         ) -> Result<bool, IdentityPortError> {
+            if let Some(replacement) = self.before_success.lock().expect("lock").take() {
+                *self.account.lock().expect("lock") = Some(replacement);
+            }
             let mut guard = self.account.lock().expect("lock");
             if let Some(account) = guard.as_mut() {
+                if account.user.status() != orbisync_domain::UserStatus::Active
+                    || account.credential.password_hash() != expected_password_hash
+                {
+                    return Err(IdentityPortError::Conflict);
+                }
                 if account.credential.failed_login_count() != expected_failed_count
                     || account.credential.locked_until() != expected_locked_until
                 {
@@ -306,6 +329,7 @@ mod tests {
             let present_repo = Arc::new(Repository {
                 account: Mutex::new(Some(account)),
                 lookups: Mutex::new(0),
+                before_success: Mutex::new(None),
             });
             let present = AuthenticationService::new(present_repo.clone(), passwords.clone());
             let wrong = present
@@ -320,6 +344,7 @@ mod tests {
             let missing_repo = Arc::new(Repository {
                 account: Mutex::new(None),
                 lookups: Mutex::new(0),
+                before_success: Mutex::new(None),
             });
             let missing = AuthenticationService::new(missing_repo.clone(), passwords);
             let absent = missing
@@ -335,6 +360,73 @@ mod tests {
             assert_eq!(*present_repo.lookups.lock().expect("lock"), 1);
             assert_eq!(*missing_repo.lookups.lock().expect("lock"), 1);
         });
+    }
+
+    #[tokio::test]
+    async fn compatibility_authentication_refuses_reset_or_disable_during_verification() {
+        for reset in [true, false] {
+            for rehash in [true, false] {
+                let now = Timestamp::from_unix_millis(1_000).expect("time");
+                let old = PasswordService::new_with_argon2(PasswordPolicy::new([]), 8_192, 1, 1)
+                    .expect("old policy");
+                let current = PasswordService::new_with_argon2(
+                    PasswordPolicy::new([]),
+                    8_192,
+                    if rehash { 2 } else { 1 },
+                    1,
+                )
+                .expect("current policy");
+                let password = SecretString::new("Cedar!Lake7-Comet");
+                let hash = old.hash(password.clone()).await.expect("old hash");
+                let user = User::new(
+                    UserId::generate(),
+                    LoginId::new("ada").expect("login"),
+                    "Ada",
+                    now,
+                )
+                .expect("user");
+                let account = LoginAccount {
+                    credential: Credential::new(user.id(), hash, now),
+                    user,
+                };
+                let mut changed = account.clone();
+                if reset {
+                    changed
+                        .user
+                        .require_password_change(now)
+                        .expect("reset flag");
+                    changed.credential = Credential::new(
+                        changed.user.id(),
+                        current
+                            .hash(SecretString::new("Maple!Lake8-Comet"))
+                            .await
+                            .expect("replacement"),
+                        now,
+                    );
+                } else {
+                    changed.user.disable(now).expect("disable");
+                }
+                let repository = Arc::new(Repository {
+                    account: Mutex::new(Some(account)),
+                    lookups: Mutex::new(0),
+                    before_success: Mutex::new(Some(changed.clone())),
+                });
+                let service = AuthenticationService::new(repository.clone(), current);
+                let error = service
+                    .authenticate(&LoginId::new("ada").expect("login"), password, now)
+                    .await
+                    .expect_err("stale authentication rejected");
+                assert_eq!(
+                    error.kind(),
+                    orbisync_application::ApplicationErrorKind::Unauthenticated
+                );
+                assert_eq!(
+                    repository.account.lock().expect("lock").as_ref(),
+                    Some(&changed),
+                    "a stale rehash must not overwrite a completed administrative edit"
+                );
+            }
+        }
     }
 
     #[allow(dead_code)]

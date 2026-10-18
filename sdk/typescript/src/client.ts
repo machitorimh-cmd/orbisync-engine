@@ -2518,9 +2518,8 @@ export class OrbiSyncClient {
    */
   private applyTokenPair(pair: TokenPair): void {
     this.accessToken = pair.access_token;
-    if (pair.refresh_token) this.refreshToken = pair.refresh_token;
-    this.accessTokenExpiresAt =
-      Date.now() + (pair.expires_in !== undefined ? pair.expires_in * 1000 : 15 * 60 * 1000);
+    this.refreshToken = pair.refresh_token ?? null;
+    this.setTokenLifetime(pair.expires_in);
   }
 
   /**
@@ -2531,19 +2530,36 @@ export class OrbiSyncClient {
    * method instead of treating it as a credential failure.
    */
   private async authenticateVia(path: string, body?: unknown): Promise<void> {
-    const res = await fetch(`${this.opts.baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body ?? {}),
-    });
-    if (res.status === 403) {
-      const detail = (await res.json().catch(() => null)) as ErrorEnvelope | null;
-      if (detail?.error?.code === "AUTH_METHOD_DISABLED") {
-        throw new AuthMethodDisabledError(`${path} is not enabled on this server`);
+    const generation = ++this.authGeneration;
+    this.refreshInFlight = null;
+    this.connectInFlight = null;
+    this.accessToken = null;
+    this.refreshToken = null;
+    this.accessTokenExpiresAt = null;
+    this.accessTokenRefreshAt = null;
+    this.setAuthState("Authenticating");
+    try {
+      const res = await fetchTransport(`${this.opts.baseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      if (res.status === 403) {
+        const detail = (await credentialJson(res).catch(() => null)) as ErrorEnvelope | null;
+        if (detail?.error?.code === "AUTH_METHOD_DISABLED") {
+          throw new AuthMethodDisabledError(`${path} is not enabled on this server`);
+        }
       }
+      if (!res.ok) throw new Error(`${path === "/v1/auth/login" ? "login" : path} failed: ${res.status}`);
+      const pair = (await credentialJson(res)) as TokenPair;
+      if (generation !== this.authGeneration) throw new Error("authentication operation superseded");
+      this.applyTokenPair(pair);
+      this.setAuthState("Authenticated");
+    } catch (error) {
+      if (generation !== this.authGeneration) throw new Error("authentication operation superseded");
+      this.setAuthState("Unauthenticated");
+      throw error;
     }
-    if (!res.ok) throw new Error(`${path} failed: ${res.status}`);
-    this.applyTokenPair((await res.json()) as TokenPair);
   }
 
   readonly auth = {
@@ -2562,31 +2578,7 @@ export class OrbiSyncClient {
     },
 
     login: async (args: { loginId: string; password: string }): Promise<void> => {
-      const generation = ++this.authGeneration;
-      this.refreshInFlight = null;
-      this.connectInFlight = null;
-      this.setAuthState("Authenticating");
-      try {
-        this.accessToken = null;
-        this.refreshToken = null;
-        this.accessTokenExpiresAt = null;
-        this.accessTokenRefreshAt = null;
-        const res = await fetchTransport(`${this.opts.baseUrl}/v1/auth/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ login_id: args.loginId, password: args.password }),
-        });
-        if (!res.ok) throw new Error(`login failed: ${res.status}`);
-        const pair = (await credentialJson(res)) as { access_token: string; refresh_token?: string; expires_in?: number };
-        if (generation !== this.authGeneration) throw new Error("authentication operation superseded");
-        this.accessToken = pair.access_token;
-        if (pair.refresh_token) this.refreshToken = pair.refresh_token;
-        this.setTokenLifetime(pair.expires_in);
-        this.setAuthState("Authenticated");
-      } catch (error) {
-        if (generation === this.authGeneration) this.setAuthState("Unauthenticated");
-        throw error;
-      }
+      await this.authenticateVia("/v1/auth/login", { login_id: args.loginId, password: args.password });
     },
 
     /**

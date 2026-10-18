@@ -23,6 +23,41 @@ use uuid::Uuid;
 
 mod common;
 
+#[tokio::test]
+async fn review_outbox_retry_identifier_is_idempotent_and_payload_bound() {
+    let Some(pool) = common::pool_or_skip().await else {
+        return;
+    };
+    let store = PgExtensionOutboxStore::new(pool.clone());
+    let event_id = Uuid::now_v7();
+    let instance_id = InstanceId::generate();
+    let event = ExtensionEvent::InstanceStarted { instance_id };
+    store
+        .append_event_with_id(event_id, event.clone())
+        .await
+        .expect("append");
+    store
+        .append_event_with_id(event_id, event)
+        .await
+        .expect("uncertain append replay");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_events WHERE event_id = $1")
+        .bind(event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(count, 1);
+    let err = store
+        .append_event_with_id(event_id, ExtensionEvent::InstanceStopped { instance_id })
+        .await
+        .expect_err("identifier cannot name another payload");
+    assert_eq!(err.kind(), ApplicationErrorKind::Conflict);
+    sqlx::query("DELETE FROM outbox_events WHERE event_id = $1")
+        .bind(event_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 static EXTENSION_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 async fn extension_test_lock() -> tokio::sync::MutexGuard<'static, ()> {

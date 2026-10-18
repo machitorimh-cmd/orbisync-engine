@@ -29,6 +29,11 @@ Milestone 1 以降で追加された機能。詳細は [`docs/design/roadmap-and
 
 ### Fixed
 
+- ログイン確定とパスワード再設定・ユーザー無効化の競合、非ローカル主体の管理操作、Argon2設定変更後の再ハッシュ判定を修正
+- SDKの認証方式切替と管理Consoleの接続先変更時に、古い非同期応答が認証情報を上書きする問題を修正
+- Resume token失効後のPresence回収、旧接続の終了処理、一時主体失効後のイベント認可、複数EntityのInterest購読維持を修正
+- Entity・監査・外部outbox保存を安定したIDで再試行し、保存待ちのInstanceが他Instanceの定期処理を停止させないよう修正。migration `0023_runtime_effect_receipts.sql` が必要
+- 白板の遠隔更新で編集中の本文・フォーカスを失う問題と、共有計測値を使う並列テストの不安定性を修正
 - クラッシュや強制終了の際に、直前の checkpoint 以降のエンティティ変更が復元されなかった問題。行テーブルへは毎 tick 書き込まれていたが起動時に読み戻していなかったため、最大 `world.checkpoint_interval_secs`（既定 300 秒）ぶんが失われていた
 - 信頼プロキシの設定値が CIDR ではなくリテラル IP 文字列として扱われていた問題
 - webhook の SSRF 検証が実際の接続先アドレスに紐づいていなかった問題

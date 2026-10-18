@@ -102,7 +102,10 @@ type ErrorEnvelope = {
 type RequestOptions = {
   authenticated?: boolean;
   allowRefresh?: boolean;
+  session?: SessionContext;
 };
+
+type SessionContext = Readonly<{ generation: number; baseUrl: string }>;
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -144,6 +147,13 @@ export class NetworkError extends Error {
   }
 }
 
+export class SessionChangedError extends Error {
+  constructor() {
+    super("認証状態または接続先が変更されたため、以前のリクエストを中止しました");
+    this.name = "SessionChangedError";
+  }
+}
+
 export function normalizeServerUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error("サーバーURLを入力してください");
@@ -181,6 +191,7 @@ export class OrbiSyncAdminApi {
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
   private refreshInFlight: Promise<void> | null = null;
+  private sessionGeneration = 0;
 
   constructor(baseUrl: string) {
     this.baseUrl = normalizeServerUrl(baseUrl);
@@ -201,21 +212,37 @@ export class OrbiSyncAdminApi {
   }
 
   clearSession(): void {
+    this.sessionGeneration++;
+    this.refreshInFlight = null;
     this.accessToken = null;
     this.refreshToken = null;
   }
 
+  private sessionContext(): SessionContext {
+    return { generation: this.sessionGeneration, baseUrl: this.baseUrl };
+  }
+
+  private requireCurrentSession(session: SessionContext): void {
+    if (session.generation !== this.sessionGeneration || session.baseUrl !== this.baseUrl) {
+      throw new SessionChangedError();
+    }
+  }
+
   async probe<T>(path: string): Promise<ProbeResult<T>> {
-    const response = await this.performFetch(path, { method: "GET" }, false);
+    const session = this.sessionContext();
+    const response = await this.performFetch(path, { method: "GET" }, false, session);
+    const body = await readBody(response);
+    this.requireCurrentSession(session);
     return {
       ok: response.ok,
       status: response.status,
-      body: (await readBody(response)) as T | ErrorEnvelope | null,
+      body: body as T | ErrorEnvelope | null,
     };
   }
 
   async login(loginId: string, password: string): Promise<User> {
     this.clearSession();
+    const session = this.sessionContext();
     const tokens = await this.request<LoginResponse>(
       "/v1/auth/login",
       {
@@ -223,25 +250,33 @@ export class OrbiSyncAdminApi {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ login_id: loginId, password }),
       },
-      { authenticated: false, allowRefresh: false },
+      { authenticated: false, allowRefresh: false, session },
     );
+    this.requireCurrentSession(session);
     this.accessToken = tokens.access_token;
     this.refreshToken = tokens.refresh_token;
     try {
-      return await this.currentUser();
+      const user = await this.currentUser();
+      this.requireCurrentSession(session);
+      return user;
     } catch (error) {
-      this.clearSession();
+      if (session.generation === this.sessionGeneration) this.clearSession();
       throw error;
     }
   }
 
   async logout(): Promise<void> {
+    // Fence existing refreshes immediately. The logout request may still renew
+    // an expired token in this generation to revoke the original server session.
+    this.sessionGeneration++;
+    this.refreshInFlight = null;
+    const session = this.sessionContext();
     try {
       if (this.accessToken) {
-        await this.request<void>("/v1/auth/logout", { method: "POST" });
+        await this.request<void>("/v1/auth/logout", { method: "POST" }, { session });
       }
     } finally {
-      this.clearSession();
+      if (session.generation === this.sessionGeneration) this.clearSession();
     }
   }
 
@@ -405,29 +440,40 @@ export class OrbiSyncAdminApi {
   ): Promise<T> {
     const authenticated = options.authenticated ?? true;
     const allowRefresh = options.allowRefresh ?? true;
-    let response = await this.performFetch(path, init, authenticated);
+    const session = options.session ?? this.sessionContext();
+    let response = await this.performFetch(path, init, authenticated, session);
+    this.requireCurrentSession(session);
 
     if (response.status === 401 && authenticated && allowRefresh && this.refreshToken) {
-      await this.refreshSession();
-      response = await this.performFetch(path, init, true);
+      await this.refreshSession(session);
+      this.requireCurrentSession(session);
+      response = await this.performFetch(path, init, true, session);
     }
 
-    if (!response.ok) throw await ApiError.fromResponse(response);
+    this.requireCurrentSession(session);
+    if (!response.ok) {
+      const error = await ApiError.fromResponse(response);
+      this.requireCurrentSession(session);
+      throw error;
+    }
     if (response.status === 204) return undefined as T;
     const body = await readBody(response);
+    this.requireCurrentSession(session);
     return body as T;
   }
 
-  private async refreshSession(): Promise<void> {
+  private async refreshSession(session: SessionContext): Promise<void> {
+    this.requireCurrentSession(session);
     if (!this.refreshInFlight) {
-      this.refreshInFlight = this.performRefresh().finally(() => {
-        this.refreshInFlight = null;
+      const operation = this.performRefresh(session).finally(() => {
+        if (this.refreshInFlight === operation) this.refreshInFlight = null;
       });
+      this.refreshInFlight = operation;
     }
     return this.refreshInFlight;
   }
 
-  private async performRefresh(): Promise<void> {
+  private async performRefresh(session: SessionContext): Promise<void> {
     const token = this.refreshToken;
     if (!token) throw new ApiError("セッションの有効期限が切れました", 401, "AUTHENTICATION_REQUIRED", null);
     try {
@@ -438,12 +484,13 @@ export class OrbiSyncAdminApi {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ refresh_token: token }),
         },
-        { authenticated: false, allowRefresh: false },
+        { authenticated: false, allowRefresh: false, session },
       );
+      this.requireCurrentSession(session);
       this.accessToken = tokens.access_token;
       this.refreshToken = tokens.refresh_token;
     } catch (error) {
-      this.clearSession();
+      if (session.generation === this.sessionGeneration) this.clearSession();
       throw error;
     }
   }
@@ -452,7 +499,9 @@ export class OrbiSyncAdminApi {
     path: string,
     init: RequestInit,
     authenticated: boolean,
+    session: SessionContext,
   ): Promise<Response> {
+    this.requireCurrentSession(session);
     const headers = new Headers(init.headers);
     if (!headers.has("Accept")) headers.set("Accept", "application/json");
     if (authenticated && this.accessToken) headers.set("Authorization", `Bearer ${this.accessToken}`);
@@ -460,7 +509,7 @@ export class OrbiSyncAdminApi {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      return await fetch(`${this.baseUrl}${path}`, {
+      return await fetch(`${session.baseUrl}${path}`, {
         ...init,
         headers,
         signal: controller.signal,

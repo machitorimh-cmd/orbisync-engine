@@ -787,8 +787,8 @@ pub async fn update_user(
             request_id,
         );
     };
-    let account = match repo.find_account(target_user_id).await {
-        Ok(Some(account)) => account,
+    let mut user = match repo.find_user(target_user_id).await {
+        Ok(Some(user)) => user,
         Ok(None) => {
             return error_response(
                 ErrorCode::ResourceNotFound,
@@ -804,7 +804,6 @@ pub async fn update_user(
             );
         }
     };
-    let mut user = account.user;
     let app_request_id = match orbisync_application::RequestId::new(request_id.clone()) {
         Ok(v) => v,
         Err(_) => {
@@ -924,8 +923,8 @@ async fn set_user_enabled_handler(
             request_id,
         );
     };
-    let account = match repo.find_account(target_user_id).await {
-        Ok(Some(account)) => account,
+    let mut user = match repo.find_user(target_user_id).await {
+        Ok(Some(user)) => user,
         Ok(None) => {
             return error_response(
                 ErrorCode::ResourceNotFound,
@@ -941,7 +940,6 @@ async fn set_user_enabled_handler(
             );
         }
     };
-    let mut user = account.user;
     let app_request_id = match orbisync_application::RequestId::new(request_id.clone()) {
         Ok(v) => v,
         Err(_) => {
@@ -1373,6 +1371,174 @@ mod idempotency_fail_closed_tests {
             )
             .expect("token service"),
         )
+    }
+
+    #[tokio::test]
+    async fn credentialless_subjects_can_be_listed_updated_disabled_and_enabled() {
+        use orbisync_domain::{AuthMethod, AuthSession, AuthSessionId, UserKind, UserStatus};
+        use orbisync_identity::{IssuableSubject, SessionIssuer};
+        let store = Arc::new(FakeIdentityStore::new());
+        let now = Timestamp::from_unix_millis(1_700_000_000_000).expect("time");
+        let clock = Arc::new(FixedClock::new(now));
+        let tokens = token_service();
+        let passwords = PasswordService::new_with_argon2(PasswordPolicy::new([]), 8_192, 1, 1)
+            .expect("passwords");
+        let admin = Arc::new(IdentityAdministrationService::new(
+            Arc::new(DynIdentityAdministrationStore(store.clone())),
+            Arc::new(DynClock(clock.clone())),
+            passwords,
+        ));
+        let (operator, _) = admin
+            .bootstrap_administrator(
+                LoginId::new("operator").expect("login"),
+                "Operator".into(),
+                RequestId::new(format!("req_{}", Uuid::now_v7())).expect("request"),
+            )
+            .await
+            .expect("administrator");
+        let operator_session = AuthSessionId::generate();
+        store
+            .save_session(
+                &AuthSession::new(
+                    operator_session,
+                    operator.id(),
+                    now,
+                    now.checked_add_millis(3_600_000).expect("expiry"),
+                )
+                .expect("session"),
+            )
+            .await
+            .expect("save session");
+        let bearer = tokens
+            .issue(operator.id(), operator_session, now)
+            .expect("access token");
+        let state = HttpState::new(
+            vec![],
+            "orbisync",
+            "test",
+            1,
+            clock.clone(),
+            900,
+            2_592_000,
+            vec![7; 32],
+        )
+        .with_token_service(tokens.clone())
+        .with_identity_repository(store.clone())
+        .with_identity_query(store.clone())
+        .with_identity_admin_service(admin);
+        let issuer = SessionIssuer::new(store.clone(), tokens, clock, vec![7; 32], 900, 2_592_000);
+        for (method, kind) in [
+            (AuthMethod::Guest, UserKind::Guest),
+            (AuthMethod::NameOnly, UserKind::NameOnly),
+            (AuthMethod::External, UserKind::External),
+        ] {
+            let user_id = orbisync_domain::UserId::generate();
+            let expires = now.checked_add_millis(3_600_000).expect("expiry");
+            let result = issuer
+                .issue(
+                    IssuableSubject {
+                        user_id,
+                        new_user: Some(orbisync_application::NewSubjectUser {
+                            login_id: LoginId::for_generated_subject(method, user_id)
+                                .expect("login"),
+                            display_name: "Visitor".into(),
+                            kind,
+                            created_at: now,
+                        }),
+                        grant_roles: vec![],
+                        ephemeral: (method != AuthMethod::External).then_some(
+                            orbisync_application::EphemeralSubjectRecord {
+                                method,
+                                created_at: now,
+                                expires_at: expires,
+                                allowed_worlds: vec![Uuid::now_v7()],
+                            },
+                        ),
+                        external: (method == AuthMethod::External).then_some(
+                            orbisync_application::ExternalIdentityRecord {
+                                issuer: "https://idp.test".into(),
+                                subject: user_id.to_string(),
+                                created_at: now,
+                            },
+                        ),
+                    },
+                    RequestId::new(format!("req_{}", Uuid::now_v7())).expect("request"),
+                    None,
+                    "auth.test",
+                )
+                .await
+                .expect("issue subject");
+            assert!(store.find_account(user_id).await.expect("lookup").is_none());
+            for (method, path, body, if_match) in [
+                ("GET", "/v1/users".to_owned(), None, None),
+                (
+                    "PATCH",
+                    format!("/v1/users/{user_id}"),
+                    Some(serde_json::json!({"display_name":"Renamed"})),
+                    Some("\"1\""),
+                ),
+                ("POST", format!("/v1/users/{user_id}/disable"), None, None),
+                ("POST", format!("/v1/users/{user_id}/enable"), None, None),
+            ] {
+                let mut request = Request::builder()
+                    .uri(path)
+                    .method(method)
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", bearer.expose_secret()),
+                    )
+                    .header("Idempotency-Key", Uuid::now_v7().to_string())
+                    .header("content-type", "application/json");
+                if let Some(revision) = if_match {
+                    request = request.header("if-match", revision);
+                }
+                let response = router(state.clone())
+                    .oneshot(
+                        request
+                            .body(Body::from(body.map(|b| b.to_string()).unwrap_or_default()))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::OK, "{kind:?}: {method}");
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+                if method == "GET" {
+                    assert!(
+                        json["items"]
+                            .as_array()
+                            .expect("items")
+                            .iter()
+                            .any(|item| item["id"] == user_id.to_string())
+                    );
+                } else if method == "PATCH" {
+                    assert_eq!(json["display_name"], "Renamed");
+                }
+            }
+            assert_eq!(
+                store
+                    .find_user(user_id)
+                    .await
+                    .expect("lookup")
+                    .expect("subject")
+                    .status(),
+                UserStatus::Active
+            );
+            assert!(
+                !store
+                    .find_session(result.session.id())
+                    .await
+                    .expect("session lookup")
+                    .expect("session")
+                    .is_active_at(now),
+                "disable revoked the existing session"
+            );
+        }
     }
 
     #[tokio::test]

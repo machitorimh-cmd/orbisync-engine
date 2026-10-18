@@ -751,6 +751,7 @@
                 delivery: Arc::new(DeliveryRegistry::new()),
                 instance_id,
                 presence,
+                epoch: 0,
                 resume_store,
             };
         }
@@ -817,7 +818,7 @@
             0,
             orbisync_domain::Revision::INITIAL,
         );
-        resume_store.mark_disconnected(presence);
+        resume_store.mark_disconnected_epoch(presence, 0);
         let metrics = Arc::new(PrometheusMetrics::new());
         let state = RealtimeState::builder(
             orbisync_config::Config::default().realtime,
@@ -920,6 +921,7 @@
                     delivery: Arc::clone(&delivery),
                     instance_id,
                     presence,
+                    epoch: 0,
                     resume_store: Arc::clone(&resume_store),
                 };
                 {
@@ -1062,6 +1064,7 @@
                 delivery: Arc::clone(&delivery),
                 instance_id,
                 presence,
+                epoch: 0,
                 resume_store: Arc::clone(&resume_store),
             };
             drop(rx);

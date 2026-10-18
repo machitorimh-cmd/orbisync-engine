@@ -12,7 +12,7 @@
 //! "推測困難"). Comparison uses [`crate::resume::constant_time_eq`] when both
 //! values are present.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -28,13 +28,13 @@ pub struct ResumeBinding {
     pub instance_id: InstanceId,
     /// Presence to rebind (same `PresenceId` on replay, §2.5).
     pub presence_id: PresenceId,
-    /// Session epoch (bind generation, §3.3). Currently always 0; the store
-    /// retains the field so future epoch bumps can be compared.
+    /// Session epoch (bind generation, §3.3), incremented on rebind.
     pub epoch: u64,
     /// Admission revision: the minimum history cursor this presence may request.
     /// Token rotation preserves it so an interrupted replay remains recoverable.
     pub last_revision: Revision,
-    /// Expiry = issued_at + grace (§3.4).
+    /// Token expiry = issued_at + grace (§3.4). For a membership cleanup
+    /// returned by the store, this is instead its disconnect-time grace deadline.
     pub expires_at: Timestamp,
     /// When the token was issued.
     pub issued_at: Timestamp,
@@ -56,7 +56,19 @@ pub struct ResumeBinding {
 pub struct ResumeSessionStore {
     clock: Arc<dyn Clock>,
     grace_seconds: u64,
-    inner: Mutex<HashMap<String, ResumeBinding>>,
+    inner: Mutex<SessionEntries>,
+}
+
+#[derive(Default)]
+struct SessionEntries {
+    tokens: HashMap<String, ResumeBinding>,
+    // Membership ownership outlives a consumed/expired token. For a
+    // disconnected owner, expires_at is the independent membership grace
+    // deadline; a token always keeps its original issuance-time TTL.
+    presences: HashMap<PresenceId, ResumeBinding>,
+    // Keep claims until the runtime acknowledges Leave. Failed or cancelled
+    // submissions remain eligible for the next maintenance pass.
+    retiring: HashSet<PresenceId>,
 }
 
 impl core::fmt::Debug for ResumeSessionStore {
@@ -66,7 +78,7 @@ impl core::fmt::Debug for ResumeSessionStore {
             .field("clock", &"dyn Clock")
             .field(
                 "entry_count",
-                &self.inner.lock().map(|g| g.len()).unwrap_or(0),
+                &self.inner.lock().map(|g| g.tokens.len()).unwrap_or(0),
             )
             .finish()
     }
@@ -80,7 +92,7 @@ impl ResumeSessionStore {
         Self {
             clock,
             grace_seconds,
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(SessionEntries::default()),
         }
     }
 
@@ -110,21 +122,69 @@ impl ResumeSessionStore {
             disconnected: false,
         };
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(token.clone(), binding);
+        guard.presences.insert(presence_id, binding.clone());
+        guard.tokens.insert(token.clone(), binding);
         token
+    }
+
+    /// Atomically transfers the presence to its next connection generation.
+    /// A presence already evicted/reaped or rebound cannot be resurrected by
+    /// a token consumed before that lifecycle change.
+    pub fn rebind(&self, previous: &ResumeBinding) -> Option<(String, u64)> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.retiring.contains(&previous.presence_id) {
+            return None;
+        }
+        let owner = guard.presences.get(&previous.presence_id)?;
+        if owner.epoch != previous.epoch
+            || owner.user_id != previous.user_id
+            || owner.instance_id != previous.instance_id
+            || owner.disconnected && is_expired(owner.expires_at, self.clock.now())
+        {
+            return None;
+        }
+        let epoch = previous.epoch.checked_add(1)?;
+        let now = self.clock.now();
+        let mut binding = previous.clone();
+        binding.epoch = epoch;
+        binding.issued_at = now;
+        binding.expires_at = timestamp_add_seconds(now, self.grace_seconds);
+        binding.disconnected = false;
+        let token = generate_token();
+        guard
+            .tokens
+            .retain(|_, value| value.presence_id != previous.presence_id);
+        guard
+            .presences
+            .insert(previous.presence_id, binding.clone());
+        guard.tokens.insert(token.clone(), binding);
+        Some((token, epoch))
+    }
+
+    /// Whether this connection still owns the presence. Token TTL is not
+    /// consulted: a long-lived connection remains the owner until disconnect.
+    #[must_use]
+    pub fn is_current(&self, presence: PresenceId, epoch: u64) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .presences
+            .get(&presence)
+            .is_some_and(|binding| binding.epoch == epoch && !binding.disconnected)
     }
 
     /// Inserts a binding under a specific token (test helper).
     #[cfg(test)]
     pub fn insert_with_token(&self, token: String, binding: ResumeBinding) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(token, binding);
+        guard.presences.insert(binding.presence_id, binding.clone());
+        guard.tokens.insert(token, binding);
     }
 
     /// Number of stored tokens (including expired, until cleaned).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+        self.inner.lock().map(|g| g.tokens.len()).unwrap_or(0)
     }
 
     /// Returns `true` when no token is stored.
@@ -133,8 +193,8 @@ impl ResumeSessionStore {
         self.len() == 0
     }
 
-    /// Drops the longest-held binding for `instance` and returns it, so the
-    /// caller can release the membership slot it was holding.
+    /// Claims the longest-held binding for `instance` for membership cleanup.
+    /// The caller acknowledges successful Leave with [`Self::complete_cleanup`].
     ///
     /// A grace-held presence occupies capacity while its owner is gone. Without
     /// a way to reclaim it, joining and disconnecting in a loop would keep an
@@ -145,25 +205,62 @@ impl ResumeSessionStore {
     /// So a live member that wants in outranks a departed one that might come
     /// back, and the evicted client simply receives `ResyncRequired`.
     ///
-    /// The oldest binding goes first because it is the closest to expiring
-    /// anyway.
+    /// The earliest disconnect grace deadline goes first.
     pub fn evict_oldest_for_instance(&self, instance: InstanceId) -> Option<ResumeBinding> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let key = guard
+        let presence = guard
+            .presences
             .iter()
-            .filter(|(_, b)| b.instance_id == instance && b.disconnected)
-            .min_by_key(|(_, b)| b.issued_at.to_unix_millis().unwrap_or(i64::MAX))
-            .map(|(k, _)| k.clone())?;
-        guard.remove(&key)
+            .filter(|(presence, b)| {
+                b.instance_id == instance && b.disconnected && !guard.retiring.contains(*presence)
+            })
+            .min_by_key(|(_, b)| b.expires_at.to_unix_millis().unwrap_or(i64::MAX))
+            .map(|(presence, _)| *presence)?;
+        guard
+            .tokens
+            .retain(|_, binding| binding.presence_id != presence);
+        guard.retiring.insert(presence);
+        guard.presences.get(&presence).cloned()
     }
 
-    /// Records that the connection holding `presence` has gone away, making its
-    /// binding eligible for eviction when the instance needs the slot.
-    pub fn mark_disconnected(&self, presence: PresenceId) {
+    /// Drops cleanup ownership only after Leave was acknowledged (or the
+    /// runtime no longer contains the membership). Stale acknowledgements may
+    /// never remove a different connection generation.
+    pub fn complete_cleanup(&self, presence: PresenceId, epoch: u64) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        for binding in guard.values_mut() {
-            if binding.presence_id == presence {
-                binding.disconnected = true;
+        if guard
+            .presences
+            .get(&presence)
+            .is_some_and(|binding| binding.epoch == epoch && binding.disconnected)
+            && guard.retiring.contains(&presence)
+        {
+            guard.presences.remove(&presence);
+            guard.retiring.remove(&presence);
+            guard
+                .tokens
+                .retain(|_, binding| binding.presence_id != presence);
+        }
+    }
+
+    /// Ends only the calling connection's ownership. Cleanup from a superseded
+    /// socket must not disconnect a newer incarnation of the same presence.
+    pub fn mark_disconnected_epoch(&self, presence: PresenceId, epoch: u64) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        self.disconnect_inner(&mut guard, presence, epoch);
+    }
+
+    fn disconnect_inner(&self, guard: &mut SessionEntries, presence: PresenceId, epoch: u64) {
+        let Some(binding) = guard.presences.get_mut(&presence) else {
+            return;
+        };
+        if binding.epoch != epoch || binding.disconnected {
+            return;
+        }
+        binding.disconnected = true;
+        binding.expires_at = timestamp_add_seconds(self.clock.now(), self.grace_seconds);
+        for token_binding in guard.tokens.values_mut() {
+            if token_binding.presence_id == presence && token_binding.epoch == epoch {
+                token_binding.disconnected = true;
             }
         }
     }
@@ -194,7 +291,7 @@ impl ResumeSessionStore {
         // Find the key with constant-time equality.
         let matched_key = {
             let mut found: Option<String> = None;
-            for k in guard.keys() {
+            for k in guard.tokens.keys() {
                 if crate::resume::constant_time_eq(k, token) {
                     found = Some(k.clone());
                     break;
@@ -205,14 +302,20 @@ impl ResumeSessionStore {
         let key = matched_key?;
         if user.is_some_and(|user| {
             guard
+                .tokens
                 .get(&key)
                 .is_none_or(|binding| binding.user_id != user)
         }) {
             return None;
         }
         // Remove single-use regardless of expiry outcome.
-        let binding = guard.remove(&key)?;
-        if is_expired(binding.expires_at, now) {
+        let binding = guard.tokens.remove(&key)?;
+        if is_expired(binding.expires_at, now)
+            || guard
+                .presences
+                .get(&binding.presence_id)
+                .is_none_or(|owner| owner.epoch != binding.epoch)
+        {
             None
         } else {
             Some(binding)
@@ -226,7 +329,7 @@ impl ResumeSessionStore {
             return None;
         }
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        for (k, v) in guard.iter() {
+        for (k, v) in guard.tokens.iter() {
             if crate::resume::constant_time_eq(k, token) {
                 let now = self.clock.now();
                 if is_expired(v.expires_at, now) {
@@ -238,23 +341,27 @@ impl ResumeSessionStore {
         None
     }
 
-    /// Removes expired entries and returns their bindings to the owner.
-    ///
-    /// The server uses the returned disconnected bindings to release the
-    /// corresponding instance memberships. Bindings for live connections may
-    /// also expire, but must not cause a `Leave` for an active socket.
+    /// Expires tokens independently and claims memberships whose grace elapsed,
+    /// including unacknowledged earlier claims. Active ownership survives token
+    /// expiry; cleanup ownership survives failed or cancelled Leave attempts.
     pub fn prune_expired(&self) -> Vec<ResumeBinding> {
         let now = self.clock.now();
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut expired = Vec::new();
-        guard.retain(|_, binding| {
-            if is_expired(binding.expires_at, now) {
-                expired.push(binding.clone());
-                false
-            } else {
-                true
-            }
-        });
+        guard
+            .tokens
+            .retain(|_, binding| !is_expired(binding.expires_at, now));
+        let expired: Vec<_> = guard
+            .presences
+            .iter()
+            .filter(|(presence, binding)| {
+                binding.disconnected
+                    && (guard.retiring.contains(*presence) || is_expired(binding.expires_at, now))
+            })
+            .map(|(_, binding)| binding.clone())
+            .collect();
+        for binding in &expired {
+            guard.retiring.insert(binding.presence_id);
+        }
         expired
     }
 }
@@ -375,7 +482,7 @@ mod tests {
             0,
             Revision::from_u64(1),
         );
-        store.mark_disconnected(presence);
+        store.mark_disconnected_epoch(presence, 0);
         clock.advance_millis(60_000);
         assert!(
             store.prune_expired().is_empty(),
@@ -408,6 +515,134 @@ mod tests {
         assert!(store.consume(&bad).is_none());
         // original still consumable
         assert!(store.consume(&token).is_some());
+    }
+
+    #[test]
+    fn active_token_expiry_preserves_disconnect_cleanup_without_extending_token_ttl() {
+        let clock = Arc::new(FixedClock::new(ts(1_000)));
+        let store = ResumeSessionStore::new(clock.clone(), 60);
+        let presence = PresenceId::generate();
+        let token = store.issue(
+            UserId::generate(),
+            InstanceId::generate(),
+            presence,
+            0,
+            Revision::INITIAL,
+        );
+        clock.advance_millis(61_000);
+        assert!(
+            store.prune_expired().is_empty(),
+            "active memberships must not be reaped"
+        );
+        assert!(
+            store.consume(&token).is_none(),
+            "token expiry remains issuance-time plus TTL"
+        );
+        assert!(store.is_current(presence, 0));
+        store.mark_disconnected_epoch(presence, 0);
+        clock.advance_millis(60_000);
+        assert!(
+            store.prune_expired().is_empty(),
+            "membership grace starts at disconnect"
+        );
+        clock.advance_millis(1);
+        let expired = store.prune_expired();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].presence_id, presence);
+        assert!(!store.is_current(presence, 0));
+    }
+
+    #[test]
+    fn consumed_token_does_not_lose_membership_cleanup_when_resume_fails() {
+        let clock = Arc::new(FixedClock::new(ts(1_000)));
+        let store = ResumeSessionStore::new(clock.clone(), 60);
+        let presence = PresenceId::generate();
+        let token = store.issue(
+            UserId::generate(),
+            InstanceId::generate(),
+            presence,
+            0,
+            Revision::INITIAL,
+        );
+        store.mark_disconnected_epoch(presence, 0);
+        assert!(store.consume(&token).is_some());
+        // A revision gap now rejects resume, so no new token is issued.
+        clock.advance_millis(60_001);
+        assert_eq!(store.prune_expired()[0].presence_id, presence);
+    }
+
+    #[test]
+    fn old_epoch_disconnect_cannot_evict_or_expire_rebound_live_presence() {
+        let clock = Arc::new(FixedClock::new(ts(1_000)));
+        let store = ResumeSessionStore::new(clock.clone(), 60);
+        let user = UserId::generate();
+        let instance = InstanceId::generate();
+        let presence = PresenceId::generate();
+        let token = store.issue(user, instance, presence, 0, Revision::INITIAL);
+        let previous = store.consume_for_user(&token, user).unwrap();
+        let (new_token, epoch) = store.rebind(&previous).unwrap();
+        assert_eq!(epoch, 1);
+        assert!(
+            store.rebind(&previous).is_none(),
+            "stale rebind cannot claim the presence again"
+        );
+        assert!(!store.is_current(presence, 0));
+        store.mark_disconnected_epoch(presence, 0);
+        assert!(store.is_current(presence, 1));
+        assert!(store.evict_oldest_for_instance(instance).is_none());
+        clock.advance_millis(60_001);
+        assert!(
+            store.prune_expired().is_empty(),
+            "old cleanup must not reap a live owner"
+        );
+        assert!(
+            store.consume(&new_token).is_none(),
+            "new token keeps its TTL"
+        );
+        store.mark_disconnected_epoch(presence, 1);
+        assert_eq!(store.evict_oldest_for_instance(instance).unwrap().epoch, 1);
+        assert!(
+            store.rebind(&previous).is_none(),
+            "evicted presence cannot be resurrected"
+        );
+    }
+
+    #[test]
+    fn cleanup_claim_survives_until_matching_leave_acknowledgement() {
+        let clock = Arc::new(FixedClock::new(ts(1_000)));
+        let store = ResumeSessionStore::new(clock, 60);
+        let user = UserId::generate();
+        let instance = InstanceId::generate();
+        let presence = PresenceId::generate();
+        let token = store.issue(user, instance, presence, 0, Revision::INITIAL);
+        store.mark_disconnected_epoch(presence, 0);
+        let binding = store.evict_oldest_for_instance(instance).unwrap();
+        assert!(
+            store.consume(&token).is_none(),
+            "a cleanup claim invalidates its token immediately"
+        );
+        assert!(
+            store.rebind(&binding).is_none(),
+            "a consumed token cannot resurrect a retiring membership"
+        );
+        assert_eq!(
+            store.prune_expired().len(),
+            1,
+            "retry eviction before its original grace deadline"
+        );
+        assert_eq!(
+            store.prune_expired().len(),
+            1,
+            "an unacknowledged attempt must stay recoverable"
+        );
+        store.complete_cleanup(presence, 1);
+        assert_eq!(
+            store.prune_expired().len(),
+            1,
+            "a stale acknowledgement cannot remove another epoch"
+        );
+        store.complete_cleanup(presence, 0);
+        assert!(store.prune_expired().is_empty());
     }
 
     #[test]

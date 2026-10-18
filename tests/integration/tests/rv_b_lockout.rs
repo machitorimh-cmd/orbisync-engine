@@ -301,7 +301,14 @@ async fn rv_b_success_does_not_erase_concurrent_failure() {
 
     // Attempt optimistic reset with stale expected (0, None) – must NOT clear
     let reset = repo
-        .reset_login_success(user.id(), expected_failed, expected_locked, now_ts(), None)
+        .reset_login_success(
+            user.id(),
+            expected_failed,
+            expected_locked,
+            account.credential.password_hash(),
+            now_ts(),
+            None,
+        )
         .await
         .expect("reset");
     assert!(

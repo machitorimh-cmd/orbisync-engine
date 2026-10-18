@@ -131,6 +131,28 @@ impl LoginTransactionStore for PgLoginStore {
             .await
             .map_err(|_| IdentityPortError::Unavailable)?;
 
+        // Password reset/change and disable lock users before credentials and
+        // sessions. Use the same order so a verified snapshot cannot create a
+        // session after a completed reset or disable (R01).
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM users WHERE id = $1 FOR UPDATE")
+                .bind(commit.user_id.as_uuid())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| IdentityPortError::Unavailable)?;
+        let password_hash: Option<String> = sqlx::query_scalar(
+            "SELECT password_hash FROM user_credentials WHERE user_id = $1 FOR UPDATE",
+        )
+        .bind(commit.user_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| IdentityPortError::Unavailable)?;
+        if status.as_deref() != Some("active")
+            || password_hash.as_deref() != Some(commit.expected_password_hash.expose_phc())
+        {
+            return Err(IdentityPortError::Conflict);
+        }
+
         // Optimistic reset of failure state. The predicate is evaluated atomically;
         // if a concurrent failure incremented the counter after `find_login`,
         // this UPDATE touches 0 rows and the concurrent failure is preserved
@@ -250,6 +272,19 @@ impl LoginTransactionStore for PgLoginStore {
                     .await
                     .map_err(|_| IdentityPortError::Unavailable)?;
             }
+        }
+
+        // Existing external identities remain subject to operator disable.
+        // Serialize this check with the same user-row lock taken by disable,
+        // so either this session is revoked by it or issuance is refused.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM users WHERE id = $1 FOR UPDATE")
+                .bind(commit.user_id.as_uuid())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| IdentityPortError::Unavailable)?;
+        if status.as_deref() != Some("active") {
+            return Err(IdentityPortError::NotFound);
         }
 
         // Absolute deadline and world boundary for a temporary subject. Written

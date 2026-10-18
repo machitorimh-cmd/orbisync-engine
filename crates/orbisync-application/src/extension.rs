@@ -292,6 +292,19 @@ pub trait ExtensionRegistrationStore: Send + Sync + 'static {
 /// Persistence port for durable extension outbox events.
 #[async_trait::async_trait]
 pub trait ExtensionOutboxStore: Send + Sync + 'static {
+    /// Appends a coordinator event under a stable retry identifier.
+    ///
+    /// Durable adapters must make repeated identical appends idempotent, even
+    /// if a commit succeeded but its acknowledgement was lost. In-memory test
+    /// adapters may use the default when failures happen before all writes.
+    async fn append_event_with_id(
+        &self,
+        _event_id: Uuid,
+        event: ExtensionEvent,
+    ) -> Result<Uuid, crate::ApplicationError> {
+        self.append_event(event).await
+    }
+
     /// Appends one event before any delivery attempt.
     async fn append_event(&self, event: ExtensionEvent) -> Result<Uuid, crate::ApplicationError>;
 }

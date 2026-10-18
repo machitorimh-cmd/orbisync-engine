@@ -18,6 +18,165 @@ use uuid::Uuid;
 
 mod common;
 
+#[tokio::test]
+async fn review_effect_receipts_replay_committed_mutations_and_audit_once() {
+    use orbisync_application::{EntityOwnershipTransferAudit, EntityPersistenceEvent};
+    let Some(pool) = common::pool_or_skip().await else {
+        return;
+    };
+    let instance_id = InstanceId::generate();
+    let at = Timestamp::from_unix_millis(1_788_000_000_000).expect("timestamp");
+    let world_id = insert_instance(&pool, instance_id, at).await;
+    let store = PgPersistentEntityStore::new(pool.clone());
+    let mut entity = Entity::new(
+        EntityId::generate(),
+        instance_id,
+        EntityKind::Object,
+        None,
+        None,
+        VisibilityPolicy::Global,
+        at,
+    );
+    let spawn_id = Uuid::now_v7();
+    let spawn = EntityPersistenceEvent::Spawned(entity.clone());
+    store
+        .apply_event(spawn_id, spawn.clone())
+        .await
+        .expect("spawn commits");
+    store
+        .apply_event(spawn_id, spawn)
+        .await
+        .expect("lost acknowledgement replay");
+
+    entity
+        .transfer_owner(entity.revision(), None, at)
+        .expect("transfer revision");
+    let transfer_id = Uuid::now_v7();
+    let transfer = EntityPersistenceEvent::OwnershipTransferred {
+        entity: entity.clone(),
+        audit: EntityOwnershipTransferAudit {
+            occurred_at: at,
+            actor_id: orbisync_domain::UserId::generate(),
+            command_id: None,
+            previous_owner: None,
+            new_owner: None,
+        },
+    };
+    store
+        .apply_event(transfer_id, transfer.clone())
+        .await
+        .expect("transfer commits");
+    store
+        .apply_event(transfer_id, transfer)
+        .await
+        .expect("transfer replay");
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE target_type = 'entity' AND target_id = $1 AND action = 'entity.ownership_transferred'",
+    ).bind(entity.id().to_string()).fetch_one(&pool).await.expect("audit count");
+    assert_eq!(
+        audit_count, 1,
+        "uncertain commits cannot repeat the audit insert"
+    );
+
+    entity
+        .update_component(entity.revision(), "example.note".into(), vec![1, 2, 3], at)
+        .expect("update revision");
+    let component_id = Uuid::now_v7();
+    let component = EntityPersistenceEvent::ComponentUpserted {
+        entity_id: entity.id(),
+        instance_id,
+        revision: entity.revision(),
+        updated_at: at,
+        component_key: "example.note".into(),
+        payload: vec![1, 2, 3],
+    };
+    store
+        .apply_event(component_id, component.clone())
+        .await
+        .expect("component commits");
+    store
+        .apply_event(component_id, component)
+        .await
+        .expect("component replay");
+    let delete_id = Uuid::now_v7();
+    let delete = EntityPersistenceEvent::Deleted {
+        entity_id: entity.id(),
+        instance_id,
+    };
+    store
+        .apply_event(delete_id, delete.clone())
+        .await
+        .expect("delete commits");
+    store
+        .apply_event(delete_id, delete)
+        .await
+        .expect("delete replay after row removal");
+    for event_id in [spawn_id, transfer_id, component_id, delete_id] {
+        store
+            .acknowledge_event(event_id)
+            .await
+            .expect("receipt cleanup");
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM runtime_effect_receipts WHERE event_id = $1)",
+        )
+        .bind(event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("receipt lookup");
+        assert!(!exists);
+    }
+    sqlx::query("DELETE FROM audit_events WHERE target_type = 'entity' AND target_id = $1")
+        .bind(entity.id().to_string())
+        .execute(&pool)
+        .await
+        .expect("audit cleanup");
+    cleanup(&pool, instance_id, world_id).await;
+}
+
+#[tokio::test]
+async fn review_failed_effect_rolls_back_receipt_and_remains_retryable() {
+    use orbisync_application::EntityPersistenceEvent;
+    let Some(pool) = common::pool_or_skip().await else {
+        return;
+    };
+    let instance_id = InstanceId::generate();
+    let at = Timestamp::from_unix_millis(1_788_000_000_000).expect("timestamp");
+    let world_id = insert_instance(&pool, instance_id, at).await;
+    let store = PgPersistentEntityStore::new(pool.clone());
+    let entity = Entity::new(
+        EntityId::generate(),
+        instance_id,
+        EntityKind::Object,
+        None,
+        None,
+        VisibilityPolicy::Global,
+        at,
+    );
+    let event_id = Uuid::now_v7();
+    let event = EntityPersistenceEvent::ComponentUpserted {
+        entity_id: entity.id(),
+        instance_id,
+        revision: Revision::from_u64(2),
+        updated_at: at,
+        component_key: "example.note".into(),
+        payload: vec![7],
+    };
+    assert!(store.apply_event(event_id, event.clone()).await.is_err());
+    store
+        .spawn(entity)
+        .await
+        .expect("dependency becomes available");
+    store
+        .apply_event(event_id, event)
+        .await
+        .expect("failed effect was not acknowledged");
+    store
+        .acknowledge_event(event_id)
+        .await
+        .expect("receipt cleanup");
+    cleanup(&pool, instance_id, world_id).await;
+}
+
 async fn insert_instance(pool: &sqlx::PgPool, instance_id: InstanceId, at: Timestamp) -> Uuid {
     let world_id = Uuid::now_v7();
     sqlx::query(

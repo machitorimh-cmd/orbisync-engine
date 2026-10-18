@@ -20,6 +20,54 @@ pub const AUDIT_ACTION_ENTITY_OWNERSHIP_TRANSFERRED: &str = "entity.ownership_tr
 /// map). The ephemeral fields of the aggregate are ignored by contract.
 #[async_trait::async_trait]
 pub trait PersistentEntityStore: Send + Sync + 'static {
+    /// Applies one coordinator effect using a stable retry identifier.
+    ///
+    /// Durable adapters must commit the identifier atomically with the write
+    /// and replay a previously committed identifier without applying it again.
+    /// The caller must never reuse an identifier for a different event. The
+    /// default supports in-memory adapters whose errors precede all writes.
+    async fn apply_event(
+        &self,
+        _event_id: uuid::Uuid,
+        event: EntityPersistenceEvent,
+    ) -> Result<(), ApplicationError> {
+        match event {
+            EntityPersistenceEvent::Spawned(entity) => self.spawn(entity).await,
+            EntityPersistenceEvent::OwnershipTransferred { entity, audit } => {
+                self.transfer_ownership(entity, audit).await
+            }
+            EntityPersistenceEvent::Deleted {
+                entity_id,
+                instance_id,
+            } => self.delete(entity_id, instance_id).await,
+            EntityPersistenceEvent::ComponentUpserted {
+                entity_id,
+                instance_id,
+                revision,
+                updated_at,
+                component_key,
+                payload,
+            } => {
+                self.upsert_component(
+                    entity_id,
+                    instance_id,
+                    revision,
+                    updated_at,
+                    component_key,
+                    payload,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Releases a retry receipt after its successful result reached the worker.
+    ///
+    /// Failure to clean up must not cause the accepted effect to be replayed.
+    async fn acknowledge_event(&self, _event_id: uuid::Uuid) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+
     /// Persists a newly spawned entity together with its components.
     ///
     /// # Errors
