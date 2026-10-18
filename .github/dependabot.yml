@@ -1,10 +1,12 @@
 version: 2
+# Disable routine version-update PRs for every target.
+# Security update PRs remain enabled.
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       rust-minor-and-patch:
         update-types: [minor, patch]
@@ -12,31 +14,31 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: npm
     directory: /sdk/typescript
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   # These projects are intentionally outside the root Cargo workspace and
   # therefore have their own Cargo.lock files.
   - package-ecosystem: cargo
     directory: /apps/load-generator
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: cargo
     directory: /fuzz
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: docker
     directory: /deploy/docker
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: docker
     directory: /deploy/compose
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
