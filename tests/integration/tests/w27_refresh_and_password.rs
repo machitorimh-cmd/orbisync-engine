@@ -616,6 +616,7 @@ async fn w27_audit_contains_no_token_secret() {
         d[..16].copy_from_slice(&Uuid::now_v7().as_bytes()[..16]);
         d
     };
+    let request_id = req_id();
     let cmd = RotateRefreshTokenCommand {
         presented_digest: digest,
         replacement: RefreshTokenReplacement {
@@ -625,34 +626,71 @@ async fn w27_audit_contains_no_token_secret() {
             expires_at: Timestamp::from_offset_date_time(now_odt + Duration::days(30)),
         },
         now: now_ts,
-        request_id: req_id(),
+        request_id: request_id.clone(),
     };
-    // Reason: test discards must_use value intentionally; the value is not needed for the assertion and dropping is explicit (A-3 allow with reason).
-    #[allow(clippy::let_underscore_must_use)]
-    let _ = orbisync_application::RefreshTokenRotationStore::rotate(&store, cmd)
+    let rotation = orbisync_application::RefreshTokenRotationStore::rotate(&store, cmd)
         .await
         .expect("rotate");
+    assert!(
+        matches!(rotation, RefreshRotationResult::Rotated { user_id: owner, session_id: session, .. }
+            if owner.as_uuid() == user_id && session.as_uuid() == session_id),
+        "the request being audited must rotate this user's session"
+    );
 
-    // Check all recent audit rows for any digest leakage
-    let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
-        "SELECT action, metadata FROM audit_events ORDER BY occurred_at DESC LIMIT 10",
+    // Correlate the exact operation: unrelated tests may write newer events,
+    // and the fixed timestamp must not move this refresh outside the sample.
+    type RefreshAuditRow = (
+        String,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+        serde_json::Value,
+    );
+    let rows: Vec<RefreshAuditRow> = sqlx::query_as(
+        "SELECT action, result, actor_user_id, target_type, target_id, metadata FROM audit_events WHERE request_id = $1",
     )
+    .bind(request_id.as_str())
     .fetch_all(&pool)
     .await
     .expect("audit");
-    for (action, meta) in rows {
-        let s = format!("{action} {}", meta);
+    assert_eq!(
+        rows.len(),
+        1,
+        "one successful rotation must have exactly one correlated audit record"
+    );
+    let (action, result, actor, target_type, target_id, meta) = &rows[0];
+    assert_eq!(action, "token.refreshed");
+    assert_eq!(result, "success");
+    assert_eq!(*actor, Some(user_id));
+    assert_eq!(target_type.as_deref(), Some("auth_session"));
+    assert_eq!(target_id.as_deref(), Some(session_id.to_string().as_str()));
+    let metadata = meta.to_string();
+    let metadata_lower = metadata.to_lowercase();
+    for forbidden in ["token", "digest", "secret", "password"] {
         assert!(
-            !s.to_lowercase().contains("digest"),
-            "audit metadata should not contain word digest for action {action}"
+            !metadata_lower.contains(forbidden),
+            "correlated refresh metadata must not contain {forbidden}"
         );
-        // token word only allowed in action, not in metadata values (metadata is checked via lower)
-        // We just ensure action is one of the two allowed token actions
+    }
+    assert_eq!(
+        *meta,
+        serde_json::json!({"session_id": session_id.to_string(), "family_id": family_id.to_string()}),
+        "refresh audit metadata must contain only public correlation identifiers"
+    );
+    for secret in [digest, repl_digest] {
+        use std::fmt::Write as _;
+        let mut hex = String::with_capacity(secret.len() * 2);
+        for byte in &secret {
+            write!(&mut hex, "{byte:02x}").expect("digest hexadecimal encoding");
+        }
         assert!(
-            action == "token.refreshed"
-                || action == "token.reuse_detected"
-                || !s.to_lowercase().contains("token"),
-            "metadata should not leak token word outside action"
+            !metadata_lower.contains(&hex),
+            "neither presented nor replacement digest may leak as hexadecimal"
+        );
+        assert!(
+            !metadata.contains(&serde_json::to_string(&secret.to_vec()).expect("digest JSON")),
+            "neither presented nor replacement digest may leak as a byte array"
         );
     }
 }

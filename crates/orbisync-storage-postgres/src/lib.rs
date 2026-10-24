@@ -211,8 +211,9 @@ mod tests {
     #[test]
     fn test_migrator_embeds_all_schema_versions() {
         // Includes checkpoint generation/codec/projection, service tokens, and
-        // idempotent runtime effect receipts.
+        // idempotent runtime effect receipts, session labels, audit indexes and
+        // the built-in administrator's operational capabilities.
         let versions: Vec<_> = MIGRATOR.iter().map(|migration| migration.version).collect();
-        assert_eq!(versions, (1_i64..=23).collect::<Vec<_>>());
+        assert_eq!(versions, (1_i64..=26).collect::<Vec<_>>());
     }
 }
