@@ -547,7 +547,9 @@ pub fn message_size_limit(
     max_message_bytes: u64,
 ) -> u64 {
     match envelope.payload.as_ref() {
-        Some(envelope::Payload::DomainEvent(_)) => max_message_bytes,
+        Some(envelope::Payload::DomainEvent(_) | envelope::Payload::DirectedEvent(_)) => {
+            max_message_bytes
+        }
         Some(envelope::Payload::EntityCommand(command)) if command.arguments.is_some() => {
             max_message_bytes
         }
@@ -1269,6 +1271,20 @@ mod tests {
             ..Envelope::default()
         };
         assert_eq!(message_size_limit(&custom, 16_384, 65_536), 65_536);
+        let directed = Envelope {
+            payload: Some(envelope::Payload::DirectedEvent(
+                orbisync_protocol::v1::DirectedEvent::default(),
+            )),
+            ..Envelope::default()
+        };
+        assert_eq!(message_size_limit(&directed, 16_384, 65_536), 65_536);
+        let activity = Envelope {
+            payload: Some(envelope::Payload::ActivityUpdate(
+                orbisync_protocol::v1::ActivityUpdate::default(),
+            )),
+            ..Envelope::default()
+        };
+        assert_eq!(message_size_limit(&activity, 16_384, 65_536), 16_384);
     }
 
     #[test]

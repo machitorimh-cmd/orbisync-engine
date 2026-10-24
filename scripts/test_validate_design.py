@@ -59,6 +59,14 @@ class ValidatorRegressionTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         self.assertTrue(any("features references missing Proto field" in error for error in self.contract_errors()))
 
+    def test_collaboration_payload_number_drift_is_rejected(self) -> None:
+        path = self.root / "proto/orbisync/v1/realtime.proto"
+        text = path.read_text(encoding="utf-8").replace("activity_snapshot = 38;", "activity_snapshot = 40;")
+        path.write_text(text, encoding="utf-8")
+        errors = self.contract_errors()
+        self.assertTrue(any("activity_snapshot must use field 38" in error for error in errors))
+        self.assertTrue(any("wire payload table differs" in error for error in errors))
+
     def test_hello_requirement_table_drift_is_rejected(self) -> None:
         path = self.root / "docs/design/realtime-protocol-and-connection.md"
         text = path.read_text(encoding="utf-8").replace("`ClientHello.client_type`", "`ClientHello.client_name`")

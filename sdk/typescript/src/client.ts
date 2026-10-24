@@ -17,6 +17,12 @@ export type { InstanceState, SyncedEntity, StateValue, StateObject } from "./syn
 export type { ReadyOptions, SyncOptions, SyncStatus };
 import { uuidv7 } from "./uuidv7.js";
 import { ConfirmedEntityCommands, type EntityCommandOptions } from "./confirmed_commands.js";
+import { InstanceActivities } from "./activities.js";
+import { ACTIVITY_FEATURE, DIRECTED_EVENTS_FEATURE, canonicalId, customEventType, ownJson, type RealtimeJsonObject } from "./realtime_features.js";
+export { InstanceActivities } from "./activities.js";
+export type { Activity, ActivityOptions } from "./activities.js";
+export { ACTIVITY_FEATURE, DIRECTED_EVENTS_FEATURE } from "./realtime_features.js";
+export type { RealtimeJsonValue, RealtimeJsonObject } from "./realtime_features.js";
 export * from "./confirmed_commands.js";
 export { uuidv7 } from "./uuidv7.js";
 export { PredictedInput, RemoteInterpolator } from "./motion.js";
@@ -39,6 +45,7 @@ import {
   type EntityCommand,
   type EntityState,
   type ErrorMessage,
+  type DirectedEvent,
 } from "./generated/orbisync/v1/realtime_pb.js";
 import {
   parseRealtimeTicketResponse,
@@ -541,6 +548,15 @@ export type InstanceJoinInfo = Readonly<{
 
 type InstanceHandler<T> = (payload: T) => void;
 
+export type DirectedEventOptions = {
+  eventType: string; data?: Record<string, unknown>;
+  recipientUserIds?: readonly string[]; recipientPresenceIds?: readonly string[];
+};
+export type ReceivedDirectedEvent = Readonly<{
+  event: Readonly<{ eventId: string; eventType: string; instanceRevision: bigint; data: RealtimeJsonObject }>;
+  recipientUserIds: readonly string[]; recipientPresenceIds: readonly string[]; resolvedPresenceIds: readonly string[];
+}>;
+
 /** A receipt confirms durability. Any retry after uncertainty must preserve the original request. */
 export type InputResult =
   | { status: "accepted"; commandId: string; entityRevision: bigint; instanceRevision: bigint }
@@ -556,6 +572,22 @@ export type InputOptions = {
 
 export class OrbiSyncInstance {
   readonly commands = new ConfirmedEntityCommands(this);
+  readonly activities = new InstanceActivities({
+    check: () => this.requireActivityTransport(),
+    update: (key, data, ttlMs) => this.sendEnvelope(create(EnvelopeSchema, {
+      protocolMajor: PROTOCOL_MAJOR, messageId: createUuidV7(), instanceId: this.instanceId,
+      payload: { case: "activityUpdate", value: { key, data: data as Record<string, never>, ttlMs } },
+    })),
+    requestSnapshot: requestId => this.sendEnvelope(create(EnvelopeSchema, {
+      protocolMajor: PROTOCOL_MAJOR, messageId: requestId, instanceId: this.instanceId,
+      payload: { case: "activitySnapshotRequest", value: {} },
+    })),
+    ownPresenceId: () => this.joinInfo?.presenceId,
+    now: () => Date.now() + this.serverClockOffset,
+    error: error => this.emit("error", error),
+  });
+  private serverFeatures = new Set<string>();
+  private serverClockOffset = 0;
   private pendingInputs = new Map<string, { settle: (result: InputResult) => void }>();
   private handlers = new Map<string, Set<InstanceHandler<unknown>>>();
   /** Last known revision per entity, stored as bigint (wire type). */
@@ -571,6 +603,7 @@ export class OrbiSyncInstance {
   get syncStatus(): SyncStatus { return this.sync?.status ?? "failed"; }
   ready(options?: ReadyOptions): Promise<void> { return this.sync?.ready(options) ?? Promise.reject(new SyncError("UNSUPPORTED_SERVER")); }
   _beginSync(generation: number, supported: boolean, options?: SyncOptions): void {
+    this.activities._reset();
     this.sync ??= new InstanceSync(this.instanceId, (event, payload) => {
       this.connectionRef?._appliedRevision(this.sync!.revision);
       this.emit(event, payload);
@@ -592,12 +625,34 @@ export class OrbiSyncInstance {
     }
     this.entityRevisions.clear();
     this.sync?.stop(error, status);
+    this.activities._reset(status === "closed");
     this.commands._stop(status === "closed", error.code);
     if (status === "closed" || status === "failed") this.handlers.clear();
   }
   _syncFailure(error: unknown): void { this.sync?.fail(error); }
   private requireReady(): void {
     if (this.sync?.enabled && this.sync.status !== "ready") throw new SyncError("NOT_READY");
+  }
+  _setServerFeatures(features: readonly string[], serverTimeUnixMs = 0n): void {
+    this.serverFeatures = new Set(features);
+    if (serverTimeUnixMs > 0n && serverTimeUnixMs <= BigInt(Number.MAX_SAFE_INTEGER)) this.serverClockOffset = Number(serverTimeUnixMs) - Date.now();
+    if (!this.serverFeatures.has(DIRECTED_EVENTS_FEATURE)) {
+      const discarded = new Set([...this.unacknowledged.values(), ...this.reliableQueue].filter(item => item.payload.case === "directedEvent").map(item => item.messageId));
+      for (const id of discarded) {
+        const uncertain = this.unacknowledged.delete(id);
+        this.emit("error", new RealtimeError({ code: uncertain ? "DELIVERY_UNKNOWN" : "UNSUPPORTED_SERVER", requestMessageId: id,
+          message: "Directed event support is unavailable", retryable: false }));
+      }
+      this.reliableQueue = this.reliableQueue.filter(item => !discarded.has(item.messageId));
+    }
+    if (!this.serverFeatures.has(ACTIVITY_FEATURE)) this.activities._reset();
+  }
+  _activityReady(): void { if (this.syncStatus === "ready") this.activities._ready(); }
+  private requireActivityTransport(): void {
+    if (!this.serverFeatures.has(ACTIVITY_FEATURE)) throw new SyncError("UNSUPPORTED_SERVER");
+    if (this.closed) throw new SyncError("CLOSED");
+    if (this.syncStatus !== "ready" || this.ws.readyState !== 1 || (this.connectionRef && !this.connectionRef._canSendInstanceMessages())) throw new SyncError("NOT_READY");
+    if (this.isCongested()) throw new SyncError("RESOURCE_LIMIT");
   }
   private joinInfo: InstanceJoinInfo | null = null;
   private initialEvents: Envelope[] | null = null;
@@ -709,12 +764,24 @@ export class OrbiSyncInstance {
 
   /** A fresh session cannot establish whether an old transient event applied. */
   _freshSession(): void {
+    const discarded = new Map<string, "DELIVERY_UNKNOWN" | "SESSION_CHANGED">();
     for (const [id, envelope] of this.unacknowledged) {
-      if (envelope.payload.case !== "domainEvent") continue;
+      if (envelope.payload.case !== "domainEvent" && envelope.payload.case !== "directedEvent") continue;
       this.unacknowledged.delete(id);
-      this.reliableQueue = this.reliableQueue.filter(item => item.messageId !== id);
-      this.emit("error", { code: "DELIVERY_UNKNOWN", requestMessageId: id, retryable: false,
-        message: "The previous session could not resume; this event may already have been delivered" });
+      discarded.set(id, "DELIVERY_UNKNOWN");
+    }
+    // Never resolve an old private request's user audience against a fresh
+    // membership. Unsent public room events keep their existing queue policy.
+    for (const envelope of this.reliableQueue) {
+      if (envelope.payload.case === "directedEvent" && !discarded.has(envelope.messageId)) discarded.set(envelope.messageId, "SESSION_CHANGED");
+    }
+    this.reliableQueue = this.reliableQueue.filter(item => !discarded.has(item.messageId));
+    this.stopFlushTimerIfIdle();
+    // Remove all old-context requests before application error callbacks run.
+    for (const [id, code] of discarded) {
+      this.emit("error", { code, requestMessageId: id, retryable: false, message: code === "DELIVERY_UNKNOWN"
+        ? "The previous session could not resume; this event may already have been delivered"
+        : "The session changed before this private event was sent; submit a new event only after reviewing the new membership" });
     }
   }
 
@@ -726,8 +793,9 @@ export class OrbiSyncInstance {
   on(event: "snapshot", handler: InstanceHandler<unknown>): void;
   on(event: "entityUpdated", handler: InstanceHandler<unknown>): void;
   on(event: "domainEvent", handler: InstanceHandler<unknown>): void;
+  on(event: "directedEvent", handler: InstanceHandler<ReceivedDirectedEvent>): void;
   on(event: string, handler: InstanceHandler<unknown>): void;
-  on(event: string, handler: InstanceHandler<unknown>): void {
+  on(event: string, handler: InstanceHandler<any>): void {
     if (event.length > 256) throw new SyncError("RESOURCE_LIMIT");
     let set = this.handlers.get(event);
     if (!set?.has(handler) && [...this.handlers.values()].reduce((count, handlers) => count + handlers.size, 0) >= 1024) throw new SyncError("RESOURCE_LIMIT");
@@ -738,10 +806,16 @@ export class OrbiSyncInstance {
     set.add(handler);
   }
 
-  off(event: string, handler: InstanceHandler<unknown>): void {
+  off(event: "directedEvent", handler: InstanceHandler<ReceivedDirectedEvent>): void;
+  off(event: string, handler: InstanceHandler<unknown>): void;
+  off(event: string, handler: InstanceHandler<any>): void {
     const handlers = this.handlers.get(event);
     handlers?.delete(handler);
     if (handlers?.size === 0) this.handlers.delete(event);
+  }
+  onDirectedEvent(handler: InstanceHandler<ReceivedDirectedEvent>): () => void {
+    this.on("directedEvent", handler);
+    return () => this.off("directedEvent", handler as InstanceHandler<unknown>);
   }
 
   // -- Queue helpers -----------------------------------------------------------
@@ -808,7 +882,7 @@ export class OrbiSyncInstance {
     envelope.sequence = BigInt(this.nextSequence());
     envelope.sentAtUnixMs = BigInt(Date.now());
     const bytes = encodeEnvelope(envelope);
-    if (envelope.payload.case === "entityCommand" || envelope.payload.case === "domainEvent") {
+    if (envelope.payload.case === "entityCommand" || envelope.payload.case === "domainEvent" || envelope.payload.case === "directedEvent") {
       this.unacknowledged.set(envelope.messageId, envelope);
     }
     try {
@@ -936,6 +1010,7 @@ export class OrbiSyncInstance {
   _close(): void {
     this.closed = true;
     this.commands._stop(true, "CLOSED");
+    this.activities._reset(true);
     this.stopFlushTimer();
     this._cancelInitialDelivery();
     this.resetSnapshotAssembly();
@@ -1149,6 +1224,47 @@ export class OrbiSyncInstance {
     return eventId;
   }
 
+  /** Private reliable delivery to current members. The sender echo confirms acceptance, not reading or durable history. */
+  sendDirectedEvent(opts: DirectedEventOptions): string {
+    this.ensureOpen();
+    if (!this.serverFeatures.has(DIRECTED_EVENTS_FEATURE)) throw new SyncError("UNSUPPORTED_SERVER");
+    if (this.syncStatus !== "ready") throw new SyncError("NOT_READY");
+    const users = opts.recipientUserIds ?? [], presences = opts.recipientPresenceIds ?? [];
+    if (!Array.isArray(users) || !Array.isArray(presences)) throw new SyncError("INVALID_UPDATE");
+    if ((users.length > 0) === (presences.length > 0)) throw new SyncError("INVALID_UPDATE");
+    const recipients = users.length ? users : presences;
+    if (recipients.length > 64) throw new SyncError("RESOURCE_LIMIT");
+    const normalized = recipients.map(canonicalId).sort();
+    if (new Set(normalized).size !== normalized.length) throw new SyncError("INVALID_UPDATE");
+    const eventType = customEventType(opts.eventType), data = ownJson(opts.data ?? {}, 65536);
+    const eventId = createUuidV7();
+    const envelope = create(EnvelopeSchema, { protocolMajor: PROTOCOL_MAJOR, messageId: eventId, instanceId: this.instanceId,
+      payload: { case: "directedEvent", value: {
+        event: { eventId, eventType, data: data as Record<string, never> },
+        recipientUserIds: users.length ? normalized : [], recipientPresenceIds: presences.length ? normalized : [],
+      } },
+    });
+    const retained = new Map([...this.unacknowledged, ...this.reliableQueue.map(item => [item.messageId, item] as const)]);
+    const bytes = [...retained.values()].reduce((sum, item) => sum + encodeEnvelope(item).byteLength, 0);
+    if (bytes + encodeEnvelope(envelope).byteLength > SEND_QUEUE_MAX_BYTES) throw new SyncError("RESOURCE_LIMIT");
+    this.enqueueReliable(clone(EnvelopeSchema, envelope));
+    return eventId;
+  }
+
+  private receiveDirectedEvent(value: DirectedEvent): void {
+    if (!this.serverFeatures.has(DIRECTED_EVENTS_FEATURE) || !value.event) return;
+    const event = value.event;
+    const received: ReceivedDirectedEvent = Object.freeze({
+      // A valid 64 KiB Struct may expand sixfold when JSON escapes control
+      // characters. Bound the copied JSON representation independently.
+      event: Object.freeze({ eventId: canonicalId(event.eventId), eventType: customEventType(event.eventType), instanceRevision: uint64(event.instanceRevision, "INVALID_UPDATE"), data: ownJson(event.data ?? {}, 512 * 1024) }),
+      recipientUserIds: Object.freeze(value.recipientUserIds.map(canonicalId)),
+      recipientPresenceIds: Object.freeze(value.recipientPresenceIds.map(canonicalId)),
+      resolvedPresenceIds: Object.freeze(value.resolvedPresenceIds.map(canonicalId)),
+    });
+    this.emit("directedEvent", received);
+  }
+
   /** Graceful close maps to server InstanceCommand::Leave (client-sdk.md §3.3). */
   async leave(): Promise<void> {
     if (this.closed) return;
@@ -1254,16 +1370,21 @@ export class OrbiSyncInstance {
     }
     const p = envelope.payload;
     if (!p) return;
+    if (["directedEvent", "activitySnapshot", "activityChanged"].includes(p.case ?? "") && envelope.instanceId !== this.instanceId) {
+      this.emit("error", new SyncError("INVALID_UPDATE")); return;
+    }
     if (p.case === "domainEvent") this.connectionRef?._revisionApplied(p.value.instanceRevision);
+    if (p.case === "directedEvent" && p.value.event) this.connectionRef?._revisionApplied(p.value.event.instanceRevision);
     if (p.case === "stateDelta") this.connectionRef?._revisionApplied(p.value.toRevision);
     const acknowledgedId = p.case === "domainEvent" ? p.value.eventId
+      : p.case === "directedEvent" ? p.value.event?.eventId
       : p.case === "entityCommand" ? p.value.commandId
       : p.case === "error" ? p.value.requestMessageId : undefined;
     if (acknowledgedId && this.unacknowledged.delete(acknowledgedId)) {
       this.reliableQueue = this.reliableQueue.filter(item => item.messageId !== acknowledgedId);
       this.stopFlushTimerIfIdle();
     }
-    if ((p.case === "domainEvent" || p.case === "entityCommand") && envelope.messageId) {
+    if ((p.case === "domainEvent" || p.case === "entityCommand" || p.case === "directedEvent") && envelope.messageId) {
       if (this.receivedReliableIds.has(envelope.messageId)) return;
       this.receivedReliableIds.add(envelope.messageId);
       if (this.receivedReliableIds.size > 8192) {
@@ -1274,10 +1395,16 @@ export class OrbiSyncInstance {
       const wasReady = this.sync.status === "ready";
       this.sync.receive(envelope);
       this.connectionRef?._appliedRevision(this.sync.revision);
-      if (!wasReady && this.sync.status === "ready") this.connectionRef?._snapshotApplied(this.sync.revision);
+      if (!wasReady && this.sync.status === "ready") {
+        this.connectionRef?._snapshotApplied(this.sync.revision);
+        this._activityReady();
+      }
       return;
     }
     switch (p.case) {
+      case "activitySnapshot": if (this.serverFeatures.has(ACTIVITY_FEATURE)) this.activities._snapshot(p.value); break;
+      case "activityChanged": if (this.serverFeatures.has(ACTIVITY_FEATURE)) this.activities._changed(p.value); break;
+      case "directedEvent": this.receiveDirectedEvent(p.value); break;
       case "joinAccepted":
         this.emit("joinAccepted", p.value);
         break;
@@ -1618,6 +1745,7 @@ export class OrbiSyncConnection {
     if (this.instance) {
       this.instance._updateWebSocket(ws);
       this.instance._updateNextSequence(this.nextSequenceForInstance);
+      this.instance._setServerFeatures(serverHello.enabledFeatures, serverHello.serverTimeUnixMs);
       this.instance._beginSync(this.socketGeneration, serverHello.enabledFeatures.includes(STATE_SYNC_FEATURE), this.client.getSyncOptions());
     }
   }
@@ -1648,6 +1776,11 @@ export class OrbiSyncConnection {
         if (p.value.instanceRevision > this.lastAppliedRevision) this.setLastAppliedRevision(p.value.instanceRevision);
         break;
       }
+      case "directedEvent": {
+        if (this.instance?._hasBufferedInitialDelivery()) break;
+        if (p.value.event && p.value.event.instanceRevision > this.lastAppliedRevision) this.setLastAppliedRevision(p.value.event.instanceRevision);
+        break;
+      }
       case "stateDelta": {
         if (this.instance?._hasBufferedInitialDelivery()) break;
         const delta = p.value as unknown as { toRevision?: bigint };
@@ -1676,7 +1809,13 @@ export class OrbiSyncConnection {
         if (this.joinedInstanceId && !this.isReconnecting) {
           this.setConnectionPhase("resyncing");
           void this.doFreshJoin()
-            .then(() => this.setConnectionPhase("connected"))
+            .then(async () => {
+              if (this.instance?._syncEnabled()) await this.instance.ready();
+              if (this.closedExplicitly) return;
+              if (this.instance) this.setSessionState("Active");
+              this.setConnectionPhase("connected");
+              this.instance?._activityReady();
+            })
             .catch(() => {
               this.setConnectionPhase("reconnecting", {
                 code: null,
@@ -1964,6 +2103,7 @@ export class OrbiSyncConnection {
       this.startHeartbeat();
       this.setSessionState(this.instance ? "Active" : "Ready");
       this.setConnectionPhase("connected");
+      this.instance?._activityReady();
     } catch (err) {
       abortController.abort();
       console.debug("[orbisync] doReconnect failed, will retry");
@@ -2014,6 +2154,10 @@ export class OrbiSyncConnection {
   private async doFreshJoin(signal?: AbortSignal): Promise<void> {
     if (!this.joinedInstanceId) return;
     this.setSessionState("Joining");
+    this.instance?._freshSession();
+    // A fresh Presence must not inherit temporary state or readiness from the
+    // previous membership, including a resync on the same socket.
+    this.instance?._beginSync(this.socketGeneration, this.serverHello.enabledFeatures.includes(STATE_SYNC_FEATURE), this.client.getSyncOptions());
     // Send JoinInstance and await JoinAccepted + Snapshot
     const seq = this.nextSequence();
     const env: Envelope = create(EnvelopeSchema, {
@@ -2235,6 +2379,7 @@ export class OrbiSyncConnection {
     });
     const inst = new OrbiSyncInstance(this.ws, worldInstanceId, this.nextSequenceForInstance);
     inst._setConnection(this);
+    inst._setServerFeatures(this.serverHello.enabledFeatures, this.serverHello.serverTimeUnixMs);
     inst._beginSync(this.socketGeneration, this.serverHello.enabledFeatures.includes(STATE_SYNC_FEATURE), this.client.getSyncOptions());
     // Install the waiter before sending. Attach the instance synchronously when
     // JoinAccepted arrives, before a coalesced Snapshot/StateDelta can follow.

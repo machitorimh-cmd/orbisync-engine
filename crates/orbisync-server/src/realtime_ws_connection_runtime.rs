@@ -282,6 +282,25 @@ async fn run_connected_socket(
     let world_id = final_world_id;
     // Presence and delivery state are initialized in both join/resume paths.
     let mut _presence_guard = presence_guard_inner;
+    let activity_sender = ActivitySender {
+        instance_id,
+        presence_id: final_presence,
+        user_id: user,
+        epoch: _presence_guard.as_ref().map_or(0, |guard| guard.epoch),
+    };
+    let directed_events = negotiated_feature(&handshake, DIRECTED_EVENTS_FEATURE);
+    let activities = negotiated_feature(&handshake, ACTIVITY_FEATURE);
+    let _activity_guard = if activities {
+        if let Err((code, detail)) = bind_activity_presence(&state, &activity_sender) {
+            send_error(&mut socket, code, detail, String::new(), handshake.negotiated_minor,
+                next_sequence_after_join, state.clock.as_ref(), &instance_id.to_string()).await;
+            return;
+        }
+        Some(ActivityPresenceGuard { state: Arc::clone(&state), sender: activity_sender })
+    } else {
+        clear_superseded_activity_presence(&state, activity_sender);
+        None
+    };
     // The registration and bounded queue were created before snapshot read.
     let publication_lock = state.registry.lifecycle_lock(instance_id);
     let outbound_queue = delivery_sink.queue();
@@ -645,7 +664,10 @@ async fn run_connected_socket(
                 let _generation_command_guard = generation_command_guard;
                 let category = match &env.payload {
                     Some(envelope::Payload::EntityCommand(_))
-                    | Some(envelope::Payload::DomainEvent(_)) => MessageCategory::Custom,
+                    | Some(envelope::Payload::DomainEvent(_))
+                    | Some(envelope::Payload::DirectedEvent(_))
+                    | Some(envelope::Payload::ActivityUpdate(_))
+                    | Some(envelope::Payload::ActivitySnapshotRequest(_)) => MessageCategory::Custom,
                     _ => MessageCategory::Normal,
                 };
                 if let Err(err) = rate_limiter.check(now, category) {
@@ -715,6 +737,58 @@ async fn run_connected_socket(
                 let mut _publication_guard = Some(publication_lock.lock().await);
                 if delivery_sink.is_closed() { break; }
                 match env.payload.take() {
+                    Some(envelope::Payload::DirectedEvent(event)) => {
+                        let now = state.clock.now();
+                        let result = if !directed_events {
+                            Err(("FEATURE_NOT_NEGOTIATED", "directed events require negotiated support".to_owned()))
+                        } else if !is_session_still_active(state.identity_repository.as_deref(), session_id, now).await
+                            || !ephemeral_participation_allowed(state.ephemeral_scope.as_deref(), user, world_id.as_uuid(), now).await {
+                            Err(("NOT_AUTHORIZED", "current participation required".to_owned()))
+                        } else {
+                            publish_directed_event(&state, instance_id, &env.instance_id, user, final_presence,
+                                event, handshake.negotiated_minor).await
+                        };
+                        match result {
+                            Ok(Some(bytes)) => {
+                                if delivery_sink.queue_payload(bytes).disconnected_slow_consumer > 0 { return; }
+                            }
+                            Ok(None) => {}
+                            Err((code, detail)) => {
+                                send_error_with_retryable(&mut socket, code, detail, message_id_for_payload,
+                                    handshake.negotiated_minor, next_sequence, state.clock.as_ref(),
+                                    &instance_id.to_string(), code == "SERVER_BUSY").await;
+                                next_sequence += 1;
+                            }
+                        }
+                    }
+                    Some(envelope::Payload::ActivityUpdate(update)) => {
+                        let result = if activities {
+                            publish_client_activity(&state, activity_sender, world_id, session_id, &env.instance_id, &update).await
+                        } else {
+                            Err(("FEATURE_NOT_NEGOTIATED", "activity requires negotiated support".to_owned()))
+                        };
+                        if let Err((code, detail)) = result {
+                            send_error_with_retryable(&mut socket, code, detail, message_id_for_payload,
+                                handshake.negotiated_minor, next_sequence, state.clock.as_ref(),
+                                &instance_id.to_string(), code == "SERVER_BUSY").await;
+                            next_sequence += 1;
+                        }
+                    }
+                    Some(envelope::Payload::ActivitySnapshotRequest(_)) => {
+                        let result = if !activities {
+                            Err(("FEATURE_NOT_NEGOTIATED", "activity requires negotiated support in this instance".to_owned()))
+                        } else if env.instance_id != instance_id.to_string() {
+                            Err(("INSTANCE_MISMATCH", "activity must target the joined instance".to_owned()))
+                        } else {
+                            send_activity_snapshot(&state, &delivery_sink, activity_sender, world_id, session_id, message_id_for_payload.clone()).await
+                        };
+                        if let Err((code, detail)) = result {
+                            send_error_with_retryable(&mut socket, code, detail, message_id_for_payload,
+                                handshake.negotiated_minor, next_sequence, state.clock.as_ref(),
+                                &instance_id.to_string(), code == "SERVER_BUSY").await;
+                            next_sequence += 1;
+                        }
+                    }
                     Some(envelope::Payload::DomainEvent(event)) => {
                         let now = state.clock.now();
                         if !is_session_still_active(state.identity_repository.as_deref(), session_id, now).await
@@ -2027,6 +2101,8 @@ async fn run_connected_socket(
                     | Some(envelope::Payload::JoinAccepted(_))
                     | Some(envelope::Payload::Snapshot(_))
                     | Some(envelope::Payload::StateDelta(_))
+                    | Some(envelope::Payload::ActivitySnapshot(_))
+                    | Some(envelope::Payload::ActivityChanged(_))
                     | Some(envelope::Payload::Heartbeat(_))
                     | Some(envelope::Payload::HeartbeatAck(_))
                     | Some(envelope::Payload::ResumeSession(_))

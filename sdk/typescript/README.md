@@ -149,6 +149,87 @@ Arguments must be plain JSON objects/arrays and are copied and deeply frozen;
 mutable typed arrays and class instances are rejected. Existing
 `sendEntityCommand`, `sendInput` and ownership helpers keep their existing APIs.
 
+## Send a directed event
+
+After `await instance.ready()`, use a separate private event payload for one
+recipient selector. User IDs address all of that user's current Presences;
+Presence IDs address only those current connections.
+
+```ts
+const unsubscribe = instance.onDirectedEvent(({ event }) => {
+  console.log(event.eventId, event.eventType, event.data);
+});
+const eventId = instance.sendDirectedEvent({
+  eventType: "custom.message",
+  recipientUserIds: [recipientUserId], // alternatively recipientPresenceIds
+  data: { text: "Hello" },
+});
+// Receiving this eventId back confirms server acceptance.
+unsubscribe();
+```
+
+`instance.on("directedEvent", listener)` also has a typed, deeply immutable
+payload. Select exactly one non-empty recipient list, with 1–64 unique canonical
+lowercase UUIDv7 IDs. Duplicate IDs are rejected; recipient order is normalized.
+Event types start with `custom.`, contain non-empty ASCII letter/digit/underscore/
+hyphen segments, and are at most 128 bytes. Data must be a plain JSON object.
+
+The negotiated `orbisync.directed-events.v1` feature is required. An unsupported
+server throws `SyncError("UNSUPPORTED_SERVER")`; the SDK never substitutes a
+broadcast DomainEvent. Reliable replay during session resume preserves the
+original ID, recipients and data. If the session cannot resume, an in-flight
+event is discarded and emits `DELIVERY_UNKNOWN`: it may already have been
+accepted. Unsent private events are also discarded on a fresh session and emit
+non-retryable `SESSION_CHANGED`; the SDK never resolves their old recipient
+selection against the new membership. Review the new context before explicitly
+submitting a new private event. A sender echo is not a delivery/read receipt or durable chat history.
+Applications define message meaning, display and storage.
+
+## Publish temporary activity
+
+Activity is authenticated, expiring state per Presence and application key.
+It is separate from membership and durable Entity state.
+
+```ts
+await instance.ready();
+const unsubscribe = instance.activities.onChange((activities) => {
+  for (const activity of activities) {
+    console.log(activity.presenceId, activity.userId, activity.key, activity.data);
+  }
+});
+instance.activities.set({
+  key: "app.editing",
+  data: { entityId },
+  ttlMs: 5000,
+});
+const current = instance.activities.current; // deeply immutable array
+instance.activities.clear("app.editing");
+unsubscribe();
+```
+
+Keys are dotted lowercase ASCII namespaces, at most 128 bytes, with non-empty
+letter/digit/underscore/hyphen segments. The top namespaces `core`, `orbisync`,
+`system` and `admin` are reserved. TTL defaults to 5000 ms and accepts integers
+250–30000 ms; `clear()` sends TTL zero. Each Presence may retain 16 keys, each
+value is limited to 4 KiB of encoded protobuf Struct data (depth 16 / 1024
+values), and an Instance has a maximum of 4096 entries. The server also enforces
+aggregate retention limits; a successful local send is not server acceptance.
+
+The `orbisync.activity.v1` feature and a ready, writable connection are required.
+Offline or congested writes throw immediately. Updates are never queued,
+automatically replayed, or optimistically added to `current`. Refresh an activity
+while work continues; stop refreshing or clear it when work ends.
+
+After initial sync and each resume the SDK automatically requests fresh activity.
+Snapshots are assembled atomically, at most 128 chunks / 512 KiB with a 10-second
+deadline. Responses are correlated to the current request; stale responses cannot
+replace newer state. Version gaps are valid. Local expiry removes old activity
+even when no removal frame arrives, and disconnect/leave clears the view. A
+snapshot failure emits `error`; `instance.activities.refresh()` explicitly
+retries without altering canonical Entity state. Subscribe before `ready()` to
+observe the first view, or read `current` after subscribing. Activity meaning
+and UI belong to the application; this API does not provide a participant panel.
+
 ## Transfer entity ownership
 
 Ownership transfer uses the same reliable queue and `command_id` deduplication

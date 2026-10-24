@@ -25,6 +25,8 @@ async fn handle_socket(
         matches!(envelope.payload, Some(envelope::Payload::ServerHello(hello))
             if hello.enabled_features.iter().any(|feature| feature == STATE_SYNC_FEATURE))
     });
+    let directed_events = negotiated_feature(&handshake, DIRECTED_EVENTS_FEATURE);
+    let activities = negotiated_feature(&handshake, ACTIVITY_FEATURE);
     // W-18: join / resume loop. After handshake ready, either JoinInstance or ResumeSession may arrive.
     // Server-stored token path (D-23) kept in process memory (D-24).
     let viewer_entity: Option<EntityId> = None;
@@ -400,6 +402,8 @@ async fn handle_socket(
                             std::collections::HashMap::new(),
                         ));
                         sink.bind_presence(pres, 0);
+                        sink.set_directed_events_enabled(directed_events);
+                        sink.set_activities_enabled(activities);
                         sink.begin_snapshot();
                         let registration = state.delivery.register_sink(iid, Arc::clone(&sink) as Arc<dyn DeliverySink>);
                         let Some(read) = state.registry.read_snapshot(iid).await else { return; };
@@ -778,6 +782,10 @@ async fn handle_socket(
                         let replay: Vec<Vec<u8>> = read.reliable_events.iter()
                             .filter(|(revision, _)| *revision > last_applied)
                             .filter(|(_, payload)| decode_envelope(payload).is_ok_and(|event| !received_ids.contains(event.message_id.as_str())))
+                            .filter(|(_, payload)| decode_envelope(payload).is_ok_and(|event| {
+                                (!matches!(event.payload, Some(envelope::Payload::DirectedEvent(_))) || directed_events)
+                                    && directed_event_visible_to(&event, Some(binding.presence_id))
+                            }))
                             .filter_map(|(_, payload)| filter_payload_with_index(
                                 payload, Some(vp), Some(user), &state.interest_grid,
                                 &read.interest_views, viewer_roles.as_deref(), &mut replay_subscribed,
@@ -788,6 +796,8 @@ async fn handle_socket(
                         if !read.members.contains(&(binding.presence_id, user)) { state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::OwnershipLost }); return; }
                         let Some((new_token, epoch)) = state.resume_store.rebind(&binding) else { state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::OwnershipLost }); return; };
                         sink.bind_presence(binding.presence_id, epoch);
+                        sink.set_directed_events_enabled(directed_events);
+                        sink.set_activities_enabled(activities);
                         presence_guard_inner = Some(PresenceGuard {
                             delivery: Arc::clone(&state.delivery),
                             instance_id: iid,

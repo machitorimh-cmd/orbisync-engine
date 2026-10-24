@@ -24,12 +24,13 @@ These features are present in the source. Their inclusion does not mean they hav
 | Worlds and instances | Creation, lookup, management, join/leave, membership management, start/stop |
 | Real-time synchronization | Authenticated WebSockets, snapshots and deltas, entity creation/update/deletion/ownership transfer, revision validation |
 | Connections and delivery | Resume and resynchronization, interest management, visibility and ownership filtering, outbound queues and backpressure |
+| Directed events and activity | Events addressed to selected users or presences, and expiring keys for typing or other activity. [Usage guide (Japanese)](docs/guides/directed-events-and-activity.md) |
 | Persistence and operations | PostgreSQL, migrations, checkpoints and restore, health, metrics, operator CLI |
 | Clients | TypeScript SDK, initial synchronization readiness, server-authoritative input API, display prediction and interpolation helpers |
 | External integration | Extension API, webhooks, operator-configured external HTTPS input rules |
 | Administration UI | Web setup and administration embedded in the Rust binary, with Japanese and English display languages |
 
-The REST contract contains 37 paths and 46 operations in [OpenAPI](openapi/orbisync-v1.yaml). The real-time contract is [realtime.proto](proto/orbisync/v1/realtime.proto). WebSockets are available at `/ws` and `/v1/realtime/ws`. The contract-to-router mapping can be checked with `scripts/validate_openapi_routes.py`.
+The REST contract is [OpenAPI](openapi/orbisync-v1.yaml). The real-time contract is [realtime.proto](proto/orbisync/v1/realtime.proto). WebSockets are available at `/ws` and `/v1/realtime/ws`. The contract-to-router mapping can be checked with `scripts/validate_openapi_routes.py`.
 
 The implementation includes SDK state application scoped to changed entries, individual entity revision access, cached presence membership, recipient indexes, and bounded concurrency for instance ticks and checkpoint work. The reference 3D demo waits for initial synchronization before sending updates and recognizes revision advances while stationary. These changes do not establish a measured speedup or a maximum supported connection count.
 

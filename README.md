@@ -24,12 +24,13 @@ OrbiSyncは、複数の認証済みクライアントでワールド、エンテ
 | World / Instance | 作成・参照・管理、参加・退出、参加者管理、起動・停止 |
 | リアルタイム同期 | 認証付きWebSocket、snapshot / delta、Entity生成・更新・削除・所有権移転、revision検証 |
 | 接続・配信 | Resumeと再同期、Interest Management、可視性・所有権に基づく配信、送信キューとbackpressure |
+| 対象限定配信・活動状態 | 指定User/Presenceへのイベント、入力中・操作中などを表現するTTL付きキー。[利用ガイド](docs/guides/directed-events-and-activity.md) |
 | 永続化・運用 | PostgreSQL、migration、checkpoint / restore、health、metrics、運用CLI |
 | クライアント | TypeScript SDK、初期同期待機、サーバー権威の入力API、表示用の予測・補間ヘルパー |
 | 外部連携 | Extension API、webhook、運用者が設定する外部HTTPS入力ルール |
 | 管理画面 | Rustバイナリに埋め込んだWebセットアップ・管理UI。日本語 / 英語の切替 |
 
-REST契約は[OpenAPI](openapi/orbisync-v1.yaml)の37 paths / 46 operations、リアルタイム契約は[realtime.proto](proto/orbisync/v1/realtime.proto)です。WebSocketは `/ws` と `/v1/realtime/ws` で提供します。契約と実Routerの対応は `scripts/validate_openapi_routes.py` で検査できます。
+REST契約は[OpenAPI](openapi/orbisync-v1.yaml)、リアルタイム契約は[realtime.proto](proto/orbisync/v1/realtime.proto)です。WebSocketは `/ws` と `/v1/realtime/ws` で提供します。契約と実Routerの対応は `scripts/validate_openapi_routes.py` で検査できます。
 
 SDKの変更対象に限定した状態適用・個別Entity revision取得、Presenceのmembershipキャッシュ、配信先の索引、Instance間の上限付きtick処理とcheckpoint処理を含みます。参照3Dデモは初期同期完了を待って送信し、静止中のrevision更新も応答として扱います。これらの実装から速度向上率や最大接続数を推定して保証するものではありません。
 

@@ -66,6 +66,8 @@ struct DeliveryFilterState {
     raw_snapshot_messages: std::collections::HashMap<String, Vec<orbisync_world_runtime::actor::EntityInterestView>>,
     membership: std::sync::Weak<()>,
     connection_owner: Option<(PresenceId, u64)>,
+    directed_events_enabled: bool,
+    activities_enabled: bool,
 }
 
 /// Connection-owned delivery handoff.
@@ -109,6 +111,8 @@ impl RealtimeDeliverySink {
                 raw_snapshot_messages: std::collections::HashMap::new(),
                 membership: std::sync::Weak::new(),
                 connection_owner: None,
+                directed_events_enabled: false,
+                activities_enabled: false,
             }),
             notify: Arc::new(Notify::new()),
             closed: AtomicBool::new(false),
@@ -121,6 +125,14 @@ impl RealtimeDeliverySink {
 
     fn bind_presence(&self, presence: PresenceId, epoch: u64) {
         self.filter.lock().unwrap_or_else(|e| e.into_inner()).connection_owner = Some((presence, epoch));
+    }
+
+    fn set_directed_events_enabled(&self, enabled: bool) {
+        self.filter.lock().unwrap_or_else(|e| e.into_inner()).directed_events_enabled = enabled;
+    }
+
+    fn set_activities_enabled(&self, enabled: bool) {
+        self.filter.lock().unwrap_or_else(|e| e.into_inner()).activities_enabled = enabled;
     }
 
     /// Register this sink before reading a snapshot. During handoff the single
@@ -152,6 +164,7 @@ impl RealtimeDeliverySink {
         let env = decode_envelope(bytes).ok()?;
         let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
         let raw = filter.raw_snapshot_messages.remove(&env.message_id);
+        if !self.accepts_directed_event(&env, &filter) { return None; }
         let revision = match env.payload.as_ref() {
             Some(envelope::Payload::StateDelta(delta)) => Some(delta.to_revision),
             Some(envelope::Payload::EntityCommand(command)) => command.instance_revision,
@@ -169,6 +182,17 @@ impl RealtimeDeliverySink {
             &views, roles.as_deref(), &mut filter.subscribed,
         )?;
         decode_envelope(&filtered).ok()
+    }
+
+    fn accepts_directed_event(&self, envelope: &Envelope, filter: &DeliveryFilterState) -> bool {
+        if matches!(envelope.payload, Some(envelope::Payload::ActivityChanged(_) | envelope::Payload::ActivitySnapshot(_))) {
+            return filter.activities_enabled && filter.connection_owner.is_some()
+                && envelope.instance_id == self.instance_id.to_string();
+        }
+        if !matches!(envelope.payload, Some(envelope::Payload::DirectedEvent(_))) { return true; }
+        filter.directed_events_enabled
+            && envelope.instance_id == self.instance_id.to_string()
+            && directed_event_visible_to(envelope, filter.connection_owner.map(|(presence, _)| presence))
     }
 
     /// Freeze publication authorization; do not consult a later incarnation.
@@ -243,6 +267,12 @@ impl RealtimeDeliverySink {
                 };
             }
         };
+        {
+            let filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
+            if !self.accepts_directed_event(&decoded, &filter) {
+                return SinkOutcome { filtered: 1, ..SinkOutcome::default() };
+            }
+        }
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         if !matches!(decoded.payload, Some(envelope::Payload::StateDelta(_)))
             && filtered.len() > SNAPSHOT_PENDING_BYTES.saturating_sub(queue.depth().bytes) {
@@ -262,7 +292,8 @@ impl RealtimeDeliverySink {
                 }
             }
             Some(envelope::Payload::EntityCommand(_))
-            | Some(envelope::Payload::DomainEvent(_)) => match queue.push_reliable(filtered) {
+            | Some(envelope::Payload::DomainEvent(_))
+            | Some(envelope::Payload::DirectedEvent(_)) => match queue.push_reliable(filtered) {
                 Ok(()) => SinkOutcome { delivered: 1, ..SinkOutcome::default() },
                 Err(error) => {
                     drop(queue);
@@ -313,6 +344,13 @@ impl DeliverySink for RealtimeDeliverySink {
             return SinkOutcome { disconnected_slow_consumer: 1, ..SinkOutcome::default() };
         }
         let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
+        // Check the frozen recipient set before retaining snapshot handoff
+        // bytes or consuming queue capacity. This also fails closed for sinks
+        // without a bound presence or feature negotiation.
+        let decoded = decode_envelope(payload).ok();
+        if decoded.as_ref().is_some_and(|env| !self.accepts_directed_event(env, &filter)) {
+            return SinkOutcome { filtered: 1, ..SinkOutcome::default() };
+        }
         let owned_views;
         let views = if let Some(views) = views {
             views
@@ -366,7 +404,6 @@ impl DeliverySink for RealtimeDeliverySink {
                 }
             }
         }
-        let decoded = decode_envelope(payload).ok();
         if let (Some(floor), Some(env)) = (filter.snapshot_revision, decoded.as_ref()) {
             let boundary = match env.payload.as_ref() {
                 Some(envelope::Payload::StateDelta(delta)) => Some(delta.to_revision),

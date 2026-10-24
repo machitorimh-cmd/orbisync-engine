@@ -217,6 +217,7 @@ async fn authenticate_connection(
             if let Ok(mut response) = decode_envelope(&handshake.server_hello_bytes) {
                 if let Some(envelope::Payload::ServerHello(hello)) = response.payload.as_mut() {
                     negotiate_state_sync(&request, hello);
+                    negotiate_collaboration_features(&request, hello);
                     handshake.server_hello_bytes = response.encode_to_vec();
                 }
             }

@@ -196,6 +196,8 @@ pub struct RealtimeState {
     pub registry: Arc<RuntimeRegistry>,
     /// Delivery registry for StateDelta fan-out.
     pub delivery: Arc<DeliveryRegistry>,
+    /// Bounded transient activity shared across authenticated connections.
+    pub activities: Arc<crate::realtime_activity::ActivityStore>,
     /// Instance-scoped bounded command results used for realtime idempotency.
     pub command_dedup: Arc<crate::command_dedup::CommandDedupStore>,
     /// Clock for timestamp generation (SystemClock in prod, FixedClock in tests).
@@ -368,6 +370,7 @@ impl RealtimeState {
             registry,
             delivery,
             command_dedup: Arc::new(crate::command_dedup::CommandDedupStore::default()),
+            activities: Arc::new(crate::realtime_activity::ActivityStore::new()),
             clock,
             default_capacity,
             interest_grid: orbisync_interest::UniformGrid::default(),
@@ -427,6 +430,7 @@ impl RealtimeState {
             registry,
             delivery,
             command_dedup: Arc::new(crate::command_dedup::CommandDedupStore::default()),
+            activities: Arc::new(crate::realtime_activity::ActivityStore::new()),
             clock,
             default_capacity,
             interest_grid,
@@ -1317,6 +1321,7 @@ impl RealtimeStateBuilder {
             config: self.config,
             registry: self.registry,
             delivery: self.delivery,
+            activities: Arc::new(crate::realtime_activity::ActivityStore::new()),
             command_dedup: self
                 .command_dedup
                 .unwrap_or_else(|| Arc::new(crate::command_dedup::CommandDedupStore::default())),

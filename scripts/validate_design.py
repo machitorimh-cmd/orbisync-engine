@@ -35,6 +35,9 @@ PROTO_FIELDS = {
     "transform_input": 26, "entity_command": 27, "domain_event": 28,
     "heartbeat": 29, "heartbeat_ack": 30, "resume_session": 31,
     "resume_accepted": 32, "resync_required": 33, "error": 34,
+    "directed_event": 35, "activity_update": 36,
+    "activity_snapshot_request": 37, "activity_snapshot": 38,
+    "activity_changed": 39,
 }
 CLIENT_HELLO_REQUIREMENTS = {
     "sdk_name": {"ClientHello.client_name"},
@@ -635,7 +638,7 @@ def check_contracts(errors: list[str]) -> None:
     for name, number in PROTO_FIELDS.items():
         if not re.search(rf"\b{re.escape(name)}\s*=\s*{number}\s*;", envelope):
             errors.append(f"{rel(proto_path)}: Envelope {name} must use field {number}")
-    proto_payload_types = dict(re.findall(r"^\s*(\w+)\s+(\w+)\s*=\s*(?:2[0-9]|3[0-4])\s*;", envelope, re.MULTILINE))
+    proto_payload_types = dict(re.findall(r"^\s*(\w+)\s+(\w+)\s*=\s*(?:2[0-9]|3[0-9])\s*;", envelope, re.MULTILINE))
     proto_payload_fields = set(proto_payload_types.values())
     if len(proto_payload_fields) != len(proto_payload_types):
         errors.append(f"{rel(proto_path)}: duplicate Envelope payload field")

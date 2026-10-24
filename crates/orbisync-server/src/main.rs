@@ -1748,6 +1748,17 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 // periodic refresh completed, 15 seconds after boot.
                 realtime_state.refresh_spawn_hook_active_cache().await;
                 let mut operational_tasks = orbisync_server::operational_runtime::OperationalTasks::default();
+                {
+                    let activity_state = Arc::clone(&realtime_state);
+                    operational_tasks.push(tokio::spawn(async move {
+                        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+                        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            ticker.tick().await;
+                            activity_state.sweep_activities();
+                        }
+                    }));
+                }
                 realtime_state.refresh_operational_metrics(&persistence_backlog);
                 {
                     let diagnostic_state = Arc::clone(&realtime_state);

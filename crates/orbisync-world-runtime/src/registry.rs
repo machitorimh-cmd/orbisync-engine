@@ -144,6 +144,9 @@ enum RuntimeTaskRequest {
     Read {
         reply: oneshot::Sender<Option<InstanceReadSnapshot>>,
     },
+    ReadMembers {
+        reply: oneshot::Sender<Option<Vec<(PresenceId, UserId)>>>,
+    },
     ReadEntity {
         id: EntityId,
         reply: oneshot::Sender<Option<Option<Entity>>>,
@@ -515,6 +518,15 @@ impl InstanceHandle {
                             ),
                         );
                     }
+                    RuntimeTaskRequest::ReadMembers { reply } => {
+                        drop(
+                            reply.send(
+                                actor
+                                    .generation_reads_available()
+                                    .then(|| actor.members_snapshot()),
+                            ),
+                        );
+                    }
                     RuntimeTaskRequest::ReadEntity { id, reply } => {
                         drop(
                             reply.send(
@@ -703,6 +715,18 @@ impl InstanceHandle {
         let (reply, response) = oneshot::channel();
         self.requests
             .send(RuntimeTaskRequest::Read { reply })
+            .await
+            .ok()?;
+        response.await.ok().flatten()
+    }
+
+    /// Reads current membership on its owning task without cloning entities or
+    /// reliable payloads. Generation recovery has the same read barrier as a
+    /// full snapshot.
+    pub async fn read_members(&self) -> Option<Vec<(PresenceId, UserId)>> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(RuntimeTaskRequest::ReadMembers { reply })
             .await
             .ok()?;
         response.await.ok().flatten()
@@ -912,6 +936,102 @@ mod tests {
             state: RuntimeState::Running,
             revision: orbisync_domain::Revision::INITIAL,
         })
+    }
+
+    #[derive(Debug)]
+    struct UnavailableMembershipGenerationStore;
+
+    #[async_trait::async_trait]
+    impl orbisync_application::checkpoint_admission::GenerationStore
+        for UnavailableMembershipGenerationStore
+    {
+        fn limits(&self) -> orbisync_application::CheckpointLimits {
+            Default::default()
+        }
+        async fn publish(
+            &self,
+            _: &orbisync_application::checkpoint_admission::GenerationAttempt,
+            _: &mut dyn orbisync_application::checkpoint_admission::GenerationSource,
+        ) -> Result<
+            orbisync_application::checkpoint_admission::GenerationResolution,
+            orbisync_application::ApplicationError,
+        > {
+            Ok(orbisync_application::checkpoint_admission::GenerationResolution::Uncertain)
+        }
+        async fn resolve(
+            &self,
+            _: &orbisync_application::checkpoint_admission::GenerationAttempt,
+        ) -> Result<
+            orbisync_application::checkpoint_admission::GenerationResolution,
+            orbisync_application::ApplicationError,
+        > {
+            Ok(orbisync_application::checkpoint_admission::GenerationResolution::Uncertain)
+        }
+    }
+
+    #[tokio::test]
+    async fn member_reads_follow_join_leave_and_fail_closed_after_writer_revocation() {
+        use orbisync_application::checkpoint_admission::{WriterPermit, WriterToken};
+        for task_owned in [false, true] {
+            let registry = RuntimeRegistry::new();
+            let mut actor = actor();
+            let instance = actor.descriptor().instance_id;
+            let writer = WriterPermit::new(WriterToken {
+                epoch: 1,
+                boot: UserId::generate().as_uuid(),
+            })
+            .unwrap();
+            actor
+                .enable_generation_admission(
+                    Some(crate::actor::GenerationBinding {
+                        store: std::sync::Arc::new(UnavailableMembershipGenerationStore),
+                        head: 0,
+                        writer: writer.clone(),
+                    }),
+                    8 * 1024 * 1024,
+                    Vec::new(),
+                )
+                .unwrap();
+            if task_owned {
+                registry.ensure_instance(actor);
+            } else {
+                registry.insert(instance, actor).unwrap();
+            }
+            let user = UserId::generate();
+            let first = orbisync_domain::PresenceId::generate();
+            let second = orbisync_domain::PresenceId::generate();
+            for presence_id in [first, second] {
+                assert!(matches!(
+                    registry
+                        .submit(
+                            instance,
+                            InstanceCommand::Join {
+                                presence_id,
+                                instance_id: instance,
+                                user_id: user,
+                                capacity: 2,
+                            }
+                        )
+                        .await
+                        .unwrap(),
+                    CommandOutcome::Applied { .. }
+                ));
+            }
+            let members = registry.read_members(instance).await.unwrap();
+            assert_eq!(members.len(), 2);
+            assert!(members.contains(&(first, user)) && members.contains(&(second, user)));
+            registry
+                .submit(instance, InstanceCommand::Leave { presence_id: first })
+                .await
+                .unwrap();
+            assert_eq!(
+                registry.read_members(instance).await.unwrap(),
+                vec![(second, user)]
+            );
+            writer.invalidate();
+            assert!(registry.read_members(instance).await.is_none());
+            assert!(registry.read_snapshot(instance).await.is_none());
+        }
     }
 
     #[tokio::test]
@@ -1431,6 +1551,20 @@ impl RuntimeRegistry {
             actor
                 .generation_reads_available()
                 .then(|| read_snapshot(actor))
+        })
+        .flatten()
+    }
+
+    /// Reads only current presence/user membership, with the full snapshot's
+    /// generation-recovery barrier and no entity payload clone.
+    pub async fn read_members(&self, id: InstanceId) -> Option<Vec<(PresenceId, UserId)>> {
+        if let Some(handle) = self.handle(id) {
+            return handle.read_members().await;
+        }
+        self.legacy_with_actor(id, |actor| {
+            actor
+                .generation_reads_available()
+                .then(|| actor.members_snapshot())
         })
         .flatten()
     }

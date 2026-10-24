@@ -98,10 +98,17 @@ oneof payload {
   ResumeAccepted resume_accepted = 32;
   ResyncRequired resync_required = 33;
   ErrorMessage error = 34;
+  DirectedEvent directed_event = 35;
+  ActivityUpdate activity_update = 36;
+  ActivitySnapshotRequest activity_snapshot_request = 37;
+  ActivitySnapshot activity_snapshot = 38;
+  ActivityChanged activity_changed = 39;
 }
 ```
 
 **[SPEC]** 現行 v1 は header field に 1〜6、payload oneof に 20〜34 を使用する（仕様 §14.1）。7〜19 は header 拡張用の空き領域として確保されている。
+
+**実装拡張** field 35〜39 は宛先限定イベントと一時的な活動状態の追加契約である。既存fieldを変更せず、`orbisync.directed-events.v1` と `orbisync.activity.v1` をそれぞれ明示的にnegotiationした接続だけで使用する。旧サーバーが宛先指定を無視して全体へ配信する経路を作らないため、宛先限定配信は独立したpayloadとし、DomainEventへのfallbackを禁止する。
 
 **[SPEC]** field number を再利用しない。削除 field は reserved とする。unknown field を許容し、enum 追加を想定する（仕様 §34.4、`transport-boundaries.md` §3.4）。
 
@@ -142,12 +149,19 @@ oneof payload {
 | TransformInput | Latest-wins | `instance_runtime`（入力） | クライアント入力 |
 | EntityCommand | Reliable | `instance_runtime` | spawn/update/delete/transfer_ownership（ADR-027） |
 | DomainEvent | Reliable | イベント所有モジュール（`domain-model.md` §5） | join/leave/ownership/role/moderation/custom 等 |
+| DirectedEvent | Reliable | `realtime_gateway` / イベント所有モジュール | 同一Instanceの指定User/Presenceに限定。送信時の対象を固定してResume時にも適用 |
+| ActivityUpdate | Reliable | `realtime_gateway` / 一時活動ストア | TTL付きキーの設定・解除。world revisionや履歴には保存しない |
+| ActivitySnapshotRequest | Reliable | `realtime_gateway` / 一時活動ストア | 自分が参加中のInstanceの活動状態を要求 |
+| ActivitySnapshot | Reliable | `realtime_gateway` / 一時活動ストア | 最大128chunk / 512KiB、全chunk受信後にSDKが反映 |
+| ActivityChanged | Reliable | `realtime_gateway` / 一時活動ストア | version順FIFO、coalesceしない。期限・退出・切断時の削除を含む |
 | Heartbeat | Control | `realtime_gateway` | 接続維持。周期は後続文書 |
 | HeartbeatAck | Control | `realtime_gateway` | 接続維持 |
 | ResumeSession | Control | `realtime_presence` | 再接続。詳細は後続文書 |
 | ResumeAccepted | Control | `realtime_presence` | 再接続。詳細は後続文書 |
 | ResyncRequired | Control | `instance_runtime` / coordinator | 再同期要求。詳細は後続文書 |
 | ErrorMessage | Control | 各検証箇所 | §5.3 |
+
+一時活動のReliable分類は接続中のFIFO送信キューを意味し、永続化やResume履歴を保証しない。SDKは期限でも削除し、再接続後は新しい活動snapshotを取得する。[実装・利用ガイド](../guides/directed-events-and-activity.md)に各層の責務と上限を記載する。
 
 **[REC]** 仕様 §14.2 の分類例との対応：
 

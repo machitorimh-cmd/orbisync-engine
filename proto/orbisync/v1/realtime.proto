@@ -30,6 +30,11 @@ message Envelope {
     ResumeAccepted resume_accepted = 32;
     ResyncRequired resync_required = 33;
     ErrorMessage error = 34;
+    DirectedEvent directed_event = 35;
+    ActivityUpdate activity_update = 36;
+    ActivitySnapshotRequest activity_snapshot_request = 37;
+    ActivitySnapshot activity_snapshot = 38;
+    ActivityChanged activity_changed = 39;
   }
 }
 
@@ -124,6 +129,53 @@ message DomainEvent {
   string event_type = 2;
   uint64 instance_revision = 3;
   google.protobuf.Struct data = 4;
+}
+
+// Separate from DomainEvent so an old server cannot silently broadcast a
+// private message after ignoring newly added recipient fields. Requires the
+// orbisync.directed-events.v1 negotiated feature.
+message DirectedEvent {
+  DomainEvent event = 1;
+  // Requests select exactly one non-empty list, at most 64 unique UUIDv7 IDs.
+  repeated string recipient_user_ids = 2;
+  repeated string recipient_presence_ids = 3;
+  // Server-only fixed audience, including the sending Presence as its echo.
+  // A new join never gains access to an older recipient's retained messages.
+  repeated string resolved_presence_ids = 4;
+}
+
+// Application-defined, non-durable activity. Core supplies authenticated
+// ownership and expiry; applications define the meaning and presentation.
+// Requires the orbisync.activity.v1 negotiated feature.
+message ActivityUpdate {
+  string key = 1;
+  google.protobuf.Struct data = 2;
+  // Zero clears this key; otherwise 250..30000 milliseconds.
+  uint32 ttl_ms = 3;
+}
+
+message ActivitySnapshotRequest {}
+
+message ActivityEntry {
+  string presence_id = 1;
+  string user_id = 2;
+  string key = 3;
+  google.protobuf.Struct data = 4;
+  int64 expires_at_unix_ms = 5;
+}
+
+message ActivitySnapshot {
+  repeated ActivityEntry activities = 1;
+  uint64 version = 2;
+  string snapshot_id = 3;
+  uint32 chunk_index = 4;
+  uint32 chunk_count = 5;
+}
+
+message ActivityChanged {
+  ActivityEntry activity = 1;
+  bool removed = 2;
+  uint64 version = 3;
 }
 
 message Heartbeat {

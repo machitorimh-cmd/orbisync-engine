@@ -394,6 +394,22 @@ impl DeliveryRegistry {
                 .collect()
         };
         drop(guard);
+        // Compatibility channels have no authenticated presence binding. They
+        // must never receive a private payload merely by sharing an instance.
+        // Production uses sinks, so avoid an extra decode on that hot path.
+        let requires_binding = targets
+            .iter()
+            .any(|target| matches!(target, RegistrationTarget::Legacy { .. }))
+            && orbisync_realtime::decode_envelope(&payload).is_ok_and(|envelope| {
+                matches!(
+                    envelope.payload,
+                    Some(
+                        orbisync_protocol::v1::envelope::Payload::DirectedEvent(_)
+                            | orbisync_protocol::v1::envelope::Payload::ActivityChanged(_)
+                            | orbisync_protocol::v1::envelope::Payload::ActivitySnapshot(_)
+                    )
+                )
+            });
         if indexed {
             self.metrics.incr(Counter::BroadcastCellCandidatesTotal);
         } else {
@@ -402,6 +418,7 @@ impl DeliveryRegistry {
         let mut disconnect = HashSet::new();
         for target in targets {
             match target {
+                RegistrationTarget::Legacy { .. } if requires_binding => {}
                 RegistrationTarget::Legacy { id, sender } => match sender.try_send(payload.clone())
                 {
                     Ok(()) => outcome.delivered += 1,

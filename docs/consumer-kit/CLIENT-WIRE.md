@@ -47,6 +47,43 @@ negotiate the feature described below before the client relies on this state
 and receipt contract. Schemas describe transport; the operator separately
 supplies game-specific rule names, intent schemas and component schemas.
 
+## Directed events and temporary activity
+
+Clients must negotiate `orbisync.directed-events.v1` and/or
+`orbisync.activity.v1` through ClientHello.supported_features and check that
+ServerHello.enabled_features includes each feature before sending its payloads.
+These are independent from state-sync negotiation. Never fall back from a
+DirectedEvent to a broadcast DomainEvent.
+
+DirectedEvent selects exactly one nonempty list of 1–64 distinct canonical
+UUIDv7 user IDs or presence IDs belonging to the same joined instance. The
+server stamps the authenticated sender in event.data.sender_user_id and
+sender_presence_id. It resolves user recipients to their current presences,
+adds the sender presence for an acceptance echo, and freezes that audience for
+retained replay. Client-supplied resolved_presence_ids are rejected. A retry
+must preserve event_id and the original payload and recipient set. This offers
+bounded in-process Resume replay, not durable/offline inboxes or read receipts.
+Data, including server-stamped sender fields, is limited to 64 KiB of encoded
+Struct, with JSON-compatible values, nesting depth 64 and the safe-integer
+rules above. The full frame must also fit the server's transport limit.
+
+ActivityUpdate sets an application-defined dotted lowercase ASCII key, a Struct
+value up to 4 KiB encoded, and ttl_ms of 250–30000. ttl_ms=0 removes a key. Only
+the authenticated presence can update its own activity. Reserved root namespaces
+are core, orbisync, system and admin. Disconnect and TTL expiry remove activity;
+never queue activity for reconnect or persist it in canonical entity state.
+
+After join and after Resume, send ActivitySnapshotRequest using a fresh
+canonical UUIDv7 Envelope.message_id. Each returned ActivitySnapshot echoes it
+as snapshot_id. Assemble all unique chunk_index values for the same ID, version
+and chunk_count before exposing a baseline; allow at most 128 chunks and 512 KiB
+including envelopes, with a 10-second deadline. Ignore stale request IDs. Buffer
+ActivityChanged received during assembly, then apply versions newer than the
+baseline in order. Versions increase process-wide and may have gaps. Changes
+are FIFO on the live connection and are not included in Resume replay. Expire
+entries locally by expires_at_unix_ms using the server clock offset, and clear
+the local view when disconnected. The TypeScript SDK implements this lifecycle.
+
 ## HTTP authentication and tickets
 
 Use the operator's HTTPS API base URL. Request/response bodies use UTF-8 JSON;

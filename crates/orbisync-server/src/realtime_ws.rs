@@ -68,6 +68,8 @@ include!("realtime_ws_connection_auth.rs");
 include!("realtime_ws_connection.rs");
 include!("realtime_ws_connection_delivery.rs");
 include!("realtime_ws_events.rs");
+include!("realtime_ws_features.rs");
+include!("realtime_ws_activity.rs");
 include!("realtime_ws_connection_runtime.rs");
 
 #[cfg(test)]
