@@ -1,3 +1,4 @@
+import { diagnosticFixture } from "./diagnostics-fixture.js";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const ADMIN_ID = "018f0000-0000-7000-8000-000000000001";
@@ -135,6 +136,12 @@ async function installMockApi(browserPage: Page): Promise<void> {
 
     expect(request.headers().authorization).toBe("Bearer access-token");
 
+    if (path === "/v1/admin/diagnostics" && method === "GET") {
+      const diagnostics = diagnosticFixture();
+      diagnostics.presence.observed_at = new Date().toISOString();
+      await json(route, 200, diagnostics);
+      return;
+    }
     if (path === "/v1/auth/me" && method === "GET") {
       await json(route, 200, users[0]);
       return;
@@ -374,7 +381,7 @@ test("管理者の主要操作をブラウザから完了できる", async ({ pa
   await expect(browserPage.locator("#memberTbody")).toContainText("現在の参加メンバーはいません");
   await browserPage.locator("#membersDialog").getByRole("button", { name: "閉じる" }).click();
 
-  await browserPage.getByRole("button", { name: "再読み込み" }).last().click();
+  await browserPage.locator("#audit").getByRole("button", { name: "再読み込み", exact: true }).click();
   await browserPage.locator("#auditActionFilter").fill("instance.started");
   await browserPage.getByRole("button", { name: "絞り込む" }).click();
   await expect(browserPage.locator("#auditTbody tr")).toHaveCount(1);

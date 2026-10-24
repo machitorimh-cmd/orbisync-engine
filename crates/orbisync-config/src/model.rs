@@ -363,6 +363,20 @@ pub struct RateLimitConfig {
     pub login_ip_block_seconds: u64,
     /// Maximum number of retained login source-IP buckets.
     pub login_ip_max_buckets: usize,
+    /// All initial authentication attempts per IP and minute, across methods.
+    pub auth_issuance_ip_per_minute: u32,
+    /// Initial local authentication attempts per IP and minute.
+    pub auth_issuance_local_per_minute: u32,
+    /// Initial guest authentication attempts per IP and minute.
+    pub auth_issuance_guest_per_minute: u32,
+    /// Initial name-only authentication attempts per IP and minute.
+    pub auth_issuance_name_only_per_minute: u32,
+    /// Initial external authentication attempts per IP and minute.
+    pub auth_issuance_external_per_minute: u32,
+    /// Process-wide in-flight initial authentication operations.
+    pub auth_issuance_max_concurrent: u32,
+    /// Process-wide temporary-subject attempts per minute (failed attempts count).
+    pub auth_temporary_subjects_per_minute: u32,
     /// Realtime tickets allowed per user and interval.
     pub realtime_ticket_per_interval: u32,
 }
@@ -625,6 +639,13 @@ impl Default for Config {
                 login_per_ip_per_minute: 10,
                 login_ip_block_seconds: 300,
                 login_ip_max_buckets: 10_000,
+                auth_issuance_ip_per_minute: 60,
+                auth_issuance_local_per_minute: 10,
+                auth_issuance_guest_per_minute: 30,
+                auth_issuance_name_only_per_minute: 30,
+                auth_issuance_external_per_minute: 30,
+                auth_issuance_max_concurrent: 32,
+                auth_temporary_subjects_per_minute: 1_000,
                 realtime_ticket_per_interval: 10,
             },
             realtime: RealtimeConfig {
@@ -817,6 +838,27 @@ impl Config {
             }
             "rate_limit.login_ip_max_buckets" => {
                 self.rate_limit.login_ip_max_buckets = parse(key, raw)?
+            }
+            "rate_limit.auth_issuance_ip_per_minute" => {
+                self.rate_limit.auth_issuance_ip_per_minute = parse(key, raw)?
+            }
+            "rate_limit.auth_issuance_local_per_minute" => {
+                self.rate_limit.auth_issuance_local_per_minute = parse(key, raw)?
+            }
+            "rate_limit.auth_issuance_guest_per_minute" => {
+                self.rate_limit.auth_issuance_guest_per_minute = parse(key, raw)?
+            }
+            "rate_limit.auth_issuance_name_only_per_minute" => {
+                self.rate_limit.auth_issuance_name_only_per_minute = parse(key, raw)?
+            }
+            "rate_limit.auth_issuance_external_per_minute" => {
+                self.rate_limit.auth_issuance_external_per_minute = parse(key, raw)?
+            }
+            "rate_limit.auth_issuance_max_concurrent" => {
+                self.rate_limit.auth_issuance_max_concurrent = parse(key, raw)?
+            }
+            "rate_limit.auth_temporary_subjects_per_minute" => {
+                self.rate_limit.auth_temporary_subjects_per_minute = parse(key, raw)?
             }
             "rate_limit.realtime_ticket_per_interval" => {
                 self.rate_limit.realtime_ticket_per_interval = parse(key, raw)?
@@ -1175,6 +1217,46 @@ impl Config {
             return Err(invalid(
                 "rate_limit.login_ip_max_buckets",
                 "must be at least 1",
+            ));
+        }
+        for (key, value) in [
+            (
+                "rate_limit.auth_issuance_ip_per_minute",
+                self.rate_limit.auth_issuance_ip_per_minute,
+            ),
+            (
+                "rate_limit.auth_issuance_local_per_minute",
+                self.rate_limit.auth_issuance_local_per_minute,
+            ),
+            (
+                "rate_limit.auth_issuance_guest_per_minute",
+                self.rate_limit.auth_issuance_guest_per_minute,
+            ),
+            (
+                "rate_limit.auth_issuance_name_only_per_minute",
+                self.rate_limit.auth_issuance_name_only_per_minute,
+            ),
+            (
+                "rate_limit.auth_issuance_external_per_minute",
+                self.rate_limit.auth_issuance_external_per_minute,
+            ),
+            (
+                "rate_limit.auth_issuance_max_concurrent",
+                self.rate_limit.auth_issuance_max_concurrent,
+            ),
+            (
+                "rate_limit.auth_temporary_subjects_per_minute",
+                self.rate_limit.auth_temporary_subjects_per_minute,
+            ),
+        ] {
+            if value == 0 {
+                return Err(invalid(key, "must be at least 1"));
+            }
+        }
+        if self.rate_limit.auth_issuance_max_concurrent > 65_536 {
+            return Err(invalid(
+                "rate_limit.auth_issuance_max_concurrent",
+                "must not exceed 65536",
             ));
         }
         if self.rate_limit.realtime_ticket_per_interval == 0 {
@@ -1771,6 +1853,32 @@ mod tests {
             "unexpected warnings: {:?}",
             loaded.warnings
         );
+    }
+
+    #[test]
+    fn auth_issuance_keys_are_environment_configurable_and_fail_closed_on_zero() {
+        for key in [
+            "auth_issuance_ip_per_minute",
+            "auth_issuance_local_per_minute",
+            "auth_issuance_guest_per_minute",
+            "auth_issuance_name_only_per_minute",
+            "auth_issuance_external_per_minute",
+            "auth_issuance_max_concurrent",
+            "auth_temporary_subjects_per_minute",
+        ] {
+            let env_key = format!("ORBISYNC_RATE_LIMIT_{}", key.to_ascii_uppercase());
+            let env = MapEnv::from_pairs([(env_key.as_str(), "7")]);
+            let loaded = Config::load(None, &env, &[]).expect("known positive setting");
+            assert!(loaded.warnings.is_empty(), "{key} must be recognized");
+            let mut config = loaded.config;
+            config
+                .apply(&format!("rate_limit.{key}"), "0")
+                .expect("known key");
+            assert!(config.validate().is_err(), "zero must not disable {key}");
+        }
+        let mut config = Config::default();
+        config.rate_limit.auth_issuance_max_concurrent = 65_537;
+        assert!(config.validate().is_err());
     }
 
     #[test]

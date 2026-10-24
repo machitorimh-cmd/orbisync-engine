@@ -104,6 +104,51 @@ It deliberately omits the resume token. Successful reliable EntityCommand
 results update the SDK's tracked entity revision, so a later update/delete can
 normally omit `expectedRevision`.
 
+## Track a confirmed EntityCommand
+
+After `await instance.ready()`, the generic command API keeps one immutable
+request (ID, JSON arguments and expected revision) for each explicit submission:
+
+```ts
+const tracked = instance.commands.submit({
+  entityId,
+  operation: "update",
+  args: { component_key: "app.label", value: "hello" },
+}, { timeoutMs: 10_000 });
+const result = await tracked.result;
+if (result.status === "unknown") {
+  // Show an explicit retry action after the instance is ready again.
+  const retryResult = await tracked.retry(); // same ID, payload and revision
+}
+console.log(tracked.request.commandId, tracked.state.status);
+```
+
+`committed` means a matching server receipt was applied to canonical state and
+includes Entity and Instance revisions. `rejected` means the first attempt was
+definitively rejected. A timeout, disconnect, send error or uncertain server
+error produces `unknown`: it does **not** mean the operation was not executed.
+A rejection after an unknown attempt remains unknown, since it cannot disprove
+an earlier commit. A late matching receipt changes the handle's state to
+`committed`, even after an attempt's Promise has already resolved as unknown.
+Snapshots alone never prove that a particular command executed.
+
+The SDK removes tracked unknown requests from automatic transport replay. Only
+`tracked.retry()` resends the retained request, and it requires ready state.
+Retries never allocate a replacement command ID or advance the saved revision.
+Use `tracked.end()` to stop tracking, or leave/close the Instance to obtain
+`ended`; neither operation cancels an operation already sent to the server.
+
+`instance.commands.onChange(listener)` returns an unsubscribe function.
+`pending`, `metrics` and `get(commandId)` inspect local unresolved tracking;
+`get` is not a server-side result query. Completed results remain on the handle
+held by the application. Each Instance retains at most 256 unresolved commands
+and 4 MiB of requests (including unknown outcomes); submission throws
+`SyncError("RESOURCE_LIMIT")` when either budget is exhausted. End tracking to
+release capacity only after explaining the unknown outcome to the user.
+Arguments must be plain JSON objects/arrays and are copied and deeply frozen;
+mutable typed arrays and class instances are rejected. Existing
+`sendEntityCommand`, `sendInput` and ownership helpers keep their existing APIs.
+
 ## Transfer entity ownership
 
 Ownership transfer uses the same reliable queue and `command_id` deduplication

@@ -171,7 +171,8 @@ mod handler_tests {
                 Counter::RateLimitRejected { .. } => {
                     self.rate_limit.fetch_add(1, Ordering::SeqCst);
                 }
-                Counter::InstanceMailboxSaturated { .. }
+                Counter::ResumeRejected { .. }
+                | Counter::InstanceMailboxSaturated { .. }
                 | Counter::InstanceMailboxDropped { .. }
                 | Counter::ExtensionDelivery { .. }
                 | Counter::ExtensionDeliveryWorkerFailure
@@ -205,7 +206,8 @@ mod handler_tests {
                 Counter::RateLimitRejected { .. } => {
                     self.rate_limit.fetch_add(n, Ordering::SeqCst);
                 }
-                Counter::InstanceMailboxSaturated { .. }
+                Counter::ResumeRejected { .. }
+                | Counter::InstanceMailboxSaturated { .. }
                 | Counter::InstanceMailboxDropped { .. }
                 | Counter::ExtensionDelivery { .. }
                 | Counter::ExtensionDeliveryWorkerFailure

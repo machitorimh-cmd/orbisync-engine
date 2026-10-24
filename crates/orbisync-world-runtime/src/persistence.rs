@@ -22,6 +22,7 @@ pub use orbisync_application::EntityPersistenceEvent;
 #[derive(Debug, Clone)]
 pub struct PersistenceOutbox {
     events: Vec<EntityPersistenceEvent>,
+    enqueued_at: Vec<std::time::Instant>,
     capacity: usize,
 }
 
@@ -46,6 +47,7 @@ impl PersistenceOutbox {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             events: Vec::with_capacity(capacity.max(1)),
+            enqueued_at: Vec::with_capacity(capacity.max(1)),
             capacity: capacity.max(1),
         }
     }
@@ -56,11 +58,21 @@ impl PersistenceOutbox {
     /// valve against unbounded growth if draining stops. Returns `true` when
     /// an older event was dropped.
     pub fn push(&mut self, event: EntityPersistenceEvent) -> bool {
+        self.push_at(event, std::time::Instant::now())
+    }
+
+    pub(crate) fn push_at(
+        &mut self,
+        event: EntityPersistenceEvent,
+        enqueued_at: std::time::Instant,
+    ) -> bool {
         let dropped = self.events.len() >= self.capacity;
         if dropped {
             self.events.remove(0);
+            self.enqueued_at.remove(0);
         }
         self.events.push(event);
+        self.enqueued_at.push(enqueued_at);
         dropped
     }
 
@@ -85,11 +97,17 @@ impl PersistenceOutbox {
     /// Drains all events, returning them in insertion order.
     #[must_use]
     pub fn drain(&mut self) -> Vec<EntityPersistenceEvent> {
+        self.enqueued_at.clear();
         core::mem::take(&mut self.events)
     }
 
     pub(crate) fn drain_prefix(&mut self, count: usize) -> Vec<EntityPersistenceEvent> {
+        self.enqueued_at.drain(..count);
         self.events.drain(..count).collect()
+    }
+
+    pub(crate) fn diagnostic_state(&self) -> (u64, Option<std::time::Instant>) {
+        (self.events.len() as u64, self.enqueued_at.first().copied())
     }
 }
 
@@ -119,6 +137,30 @@ mod tests {
         let drained = outbox.drain();
         assert_eq!(drained, vec![e1, e2]);
         assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn diagnostic_age_follows_oldest_remaining_effect_and_resets_on_drain() {
+        let mut outbox = PersistenceOutbox::with_capacity(2);
+        let instance = InstanceId::generate();
+        outbox.push(deleted(instance));
+        outbox.enqueued_at[0] = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        outbox.push(deleted(instance));
+        let (count, oldest) = outbox.diagnostic_state();
+        assert_eq!(count, 2);
+        assert!(oldest.expect("oldest").elapsed().as_secs() >= 10);
+        assert_eq!(outbox.drain_prefix(1).len(), 1);
+        assert!(
+            outbox
+                .diagnostic_state()
+                .1
+                .expect("remaining")
+                .elapsed()
+                .as_secs()
+                < 2
+        );
+        drop(outbox.drain());
+        assert_eq!(outbox.diagnostic_state(), (0, None));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! cfg-gated, shadowed Router, `//` comment) is now correctly NOT counted as
 //! served, so the gate cannot be fooled by dead code.
 //!
-//! Preservation: implemented + planned must remain 37 paths / 46 ops, and both
+//! Preservation: implemented + planned must remain 44 paths / 55 ops, and both
 //! directions must fail (declared-but-not-routable AND served-but-not-declared via
 //! planned becoming routable).  Methods are distinguished.
 
@@ -159,8 +159,8 @@ async fn is_routable(router: axum::Router, method: &str, path: &str) -> bool {
 /// name-only and external endpoints -- each with one operation, so both counts
 /// rise by four. Engine Web administration adds one permission-probe operation.
 /// Operational diagnostics and ADR-007 add one path and operation each.
-const ORIGINAL_PATHS: usize = 37;
-const ORIGINAL_OPS: usize = 46;
+const ORIGINAL_PATHS: usize = 44;
+const ORIGINAL_OPS: usize = 55;
 
 #[tokio::test]
 async fn openapi_implemented_ops_are_routable() {

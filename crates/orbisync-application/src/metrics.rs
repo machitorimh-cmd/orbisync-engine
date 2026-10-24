@@ -107,6 +107,12 @@ pub enum RateLimitScope {
     Ip,
     /// Password-hash worker concurrency.
     PasswordHash,
+    /// Per IP and initial authentication method.
+    AuthMethod,
+    /// Process-wide initial authentication concurrency.
+    AuthConcurrency,
+    /// Process-wide temporary-subject issuance budget.
+    TemporarySubjectBudget,
     /// Per instance
     Instance,
 }
@@ -143,6 +149,9 @@ impl RateLimitScope {
             Self::User => "user",
             Self::Ip => "ip",
             Self::PasswordHash => "password_hash",
+            Self::AuthMethod => "auth_method",
+            Self::AuthConcurrency => "auth_concurrency",
+            Self::TemporarySubjectBudget => "temporary_subject_budget",
             Self::Instance => "instance",
         }
     }
@@ -152,6 +161,11 @@ impl RateLimitScope {
 /// Adding more without wiring is intentionally forbidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Counter {
+    /// `resume_rejections_total{reason}` with a bounded vocabulary.
+    ResumeRejected {
+        /// Rejection category, never a credential or identifier.
+        reason: ResumeRejectReason,
+    },
     /// `http_requests_total{method,status}`
     HttpRequests {
         /// HTTP method
@@ -236,6 +250,134 @@ pub enum Counter {
     CheckpointRestoreFailuresTotal,
 }
 
+/// Bounded reasons used by Resume rejection metrics and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResumeRejectReason {
+    /// Token comparison or presence failure.
+    TokenMismatch,
+    /// Missing token, runtime or history.
+    HistoryUnavailable,
+    /// Retained history gap.
+    RevisionGap,
+    /// Client ahead of server.
+    FutureRevision,
+    /// Current authorization denied.
+    NotAuthorized,
+    /// Presence ownership was retired or superseded.
+    OwnershipLost,
+}
+
+impl ResumeRejectReason {
+    /// All supported labels, bounded independently of input.
+    pub const ALL: [Self; 6] = [
+        Self::TokenMismatch,
+        Self::HistoryUnavailable,
+        Self::RevisionGap,
+        Self::FutureRevision,
+        Self::NotAuthorized,
+        Self::OwnershipLost,
+    ];
+    /// Stable Prometheus label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TokenMismatch => "token_mismatch",
+            Self::HistoryUnavailable => "history_unavailable",
+            Self::RevisionGap => "revision_gap",
+            Self::FutureRevision => "future_revision",
+            Self::NotAuthorized => "not_authorized",
+            Self::OwnershipLost => "ownership_lost",
+        }
+    }
+}
+
+/// Fixed operational gauges. No user, instance or connection IDs are labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperationalGauge {
+    /// Current connected Presence generations.
+    PresenceConnected,
+    /// Normal disconnected grace retention.
+    PresenceGraceWaiting,
+    /// Memberships awaiting acknowledged reclamation.
+    PresenceReclaimWaiting,
+    /// Runtime Memberships sampled with the binding counts.
+    PresenceMemberships,
+    /// Memberships lacking any lifecycle binding.
+    MembershipsWithoutBinding,
+    /// Lifecycle bindings lacking runtime Memberships.
+    BindingsWithoutMembership,
+    /// Joined delivery registrations.
+    JoinedConnections,
+    /// Joined connection/connected owner discrepancy.
+    ConnectionOwnershipMismatch,
+    /// Runtime sample Unix timestamp (seconds).
+    PresenceObservedUnixSeconds,
+    /// Total pending persistence work units.
+    PersistencePending,
+    /// Oldest pending persistence age in seconds.
+    PersistenceOldestPendingSeconds,
+    /// Pending entity effects.
+    PersistenceEntityEvents,
+    /// Pending command outcomes.
+    PersistenceCommandOutcomes,
+    /// Retained generation snapshots.
+    PersistenceGenerationSnapshots,
+    /// Latest successfully saved checkpoint creation Unix timestamp (seconds).
+    LatestCheckpointUnixSeconds,
+    /// Retained extension dead letters.
+    ExtensionDeadLetters,
+    /// Last successful diagnostics database sample Unix timestamp (seconds).
+    DiagnosticsDatabaseObservedUnixSeconds,
+}
+
+impl OperationalGauge {
+    /// Complete bounded vocabulary registered even before the first sample.
+    pub const ALL: [Self; 17] = [
+        Self::PresenceConnected,
+        Self::PresenceGraceWaiting,
+        Self::PresenceReclaimWaiting,
+        Self::PresenceMemberships,
+        Self::MembershipsWithoutBinding,
+        Self::BindingsWithoutMembership,
+        Self::JoinedConnections,
+        Self::ConnectionOwnershipMismatch,
+        Self::PresenceObservedUnixSeconds,
+        Self::PersistencePending,
+        Self::PersistenceOldestPendingSeconds,
+        Self::PersistenceEntityEvents,
+        Self::PersistenceCommandOutcomes,
+        Self::PersistenceGenerationSnapshots,
+        Self::LatestCheckpointUnixSeconds,
+        Self::ExtensionDeadLetters,
+        Self::DiagnosticsDatabaseObservedUnixSeconds,
+    ];
+    /// Stable metric name. The enum deliberately offers no free-form labels.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PresenceConnected => "presence_connected",
+            Self::PresenceGraceWaiting => "presence_grace_waiting",
+            Self::PresenceReclaimWaiting => "presence_reclaim_waiting",
+            Self::PresenceMemberships => "presence_memberships",
+            Self::MembershipsWithoutBinding => "presence_memberships_without_binding",
+            Self::BindingsWithoutMembership => "presence_bindings_without_membership",
+            Self::JoinedConnections => "presence_joined_connections",
+            Self::ConnectionOwnershipMismatch => "presence_connection_ownership_mismatch",
+            Self::PresenceObservedUnixSeconds => "presence_observed_timestamp_seconds",
+            Self::PersistencePending => "persistence_pending",
+            Self::PersistenceOldestPendingSeconds => "persistence_oldest_pending_seconds",
+            Self::PersistenceEntityEvents => "persistence_entity_events_pending",
+            Self::PersistenceCommandOutcomes => "persistence_command_outcomes_pending",
+            Self::PersistenceGenerationSnapshots => "persistence_generation_snapshots_pending",
+            Self::LatestCheckpointUnixSeconds => "checkpoint_latest_timestamp_seconds",
+            Self::ExtensionDeadLetters => "extension_dead_letters",
+            Self::DiagnosticsDatabaseObservedUnixSeconds => {
+                "diagnostics_database_observed_timestamp_seconds"
+            }
+        }
+    }
+}
+
 /// Bounded reason vocabulary for WebSocket disconnects.
 ///
 /// This enum is deliberately finite: connection, user, instance and entity
@@ -315,6 +457,11 @@ pub enum Histogram {
 /// Gauge metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gauge {
+    /// Additional bounded operational state for diagnostics and alerting.
+    Operational {
+        /// Fixed metric vocabulary, without identifier labels.
+        kind: OperationalGauge,
+    },
     /// `instance_command_queue_depth{queue}`.
     InstanceCommandQueueDepth {
         /// Mailbox queue whose pending item count is reported.

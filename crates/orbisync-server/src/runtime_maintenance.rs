@@ -7,6 +7,7 @@ use futures_util::{StreamExt, stream};
 use orbisync_application::metrics::{Counter, Histogram, MetricsRecorder};
 use orbisync_application::{CheckpointStore, ExtensionOutboxStore, PersistentEntityStore};
 use orbisync_domain::{Clock as _, InstanceId, SystemClock, Timestamp};
+use orbisync_server::operational_runtime::PersistenceBacklog;
 use orbisync_server::{command_dedup::CommandDedupStore, delivery::DeliveryRegistry};
 use orbisync_world_runtime::{RuntimeRegistry, registry::InstanceEffects};
 use tokio::sync::{Semaphore, watch};
@@ -23,6 +24,7 @@ pub(crate) struct MaintenanceServices {
     pub dedup: Arc<CommandDedupStore>,
     pub metrics: Arc<dyn MetricsRecorder>,
     pub checkpoint_permits: Arc<Semaphore>,
+    pub pending_persistence: Arc<PersistenceBacklog>,
 }
 
 #[derive(Clone, Copy)]
@@ -194,12 +196,19 @@ impl RuntimeWorkers {
 
 impl MaintenanceServices {
     async fn persist_effects(&self, effects: InstanceEffects) {
-        super::persist_entity_events(
-            self.entities.as_ref(),
-            self.metrics.as_ref(),
-            effects.persistence_events,
-        )
-        .await;
+        let pending = self.pending_persistence.track_since(
+            effects.persistence_events.len(),
+            effects.persistence_oldest_at,
+        );
+        for event in effects.persistence_events {
+            super::persist_entity_events(
+                self.entities.as_ref(),
+                self.metrics.as_ref(),
+                vec![event],
+            )
+            .await;
+            pending.complete_one();
+        }
         super::persist_extension_events(self.extensions.as_ref(), effects.events).await;
     }
 
@@ -244,6 +253,7 @@ impl MaintenanceServices {
             self.persist_effects(InstanceEffects {
                 events,
                 persistence_events,
+                persistence_oldest_at: None,
             })
             .await;
         } else if checkpoint_due {

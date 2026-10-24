@@ -353,6 +353,14 @@ async fn run_connected_socket(
                     _ => continue,
                 };
                 let now = state.clock.now();
+                // Revocation applies to every message on an established socket,
+                // including heartbeats and resync, rather than only mutations.
+                if !is_session_still_active(state.identity_repository.as_deref(), session_id, now).await {
+                    send_error(&mut socket, "NOT_AUTHORIZED", "authentication session is no longer active".into(),
+                        String::new(), handshake.negotiated_minor, next_sequence,
+                        state.clock.as_ref(), &instance_id.to_string()).await;
+                    break;
+                }
                 let foreground_deadline =
                     tokio::time::Instant::now() + PERSISTENCE_FOREGROUND_DEADLINE;
                 if heartbeat.is_timed_out(now) {
@@ -2049,6 +2057,12 @@ async fn run_connected_socket(
                     .unwrap_or_else(|e| e.into_inner())
                     .is_empty()
                 {
+                    // Idle recipients must not keep receiving queued world data
+                    // after REST revocation. Check each bounded delivery batch.
+                    if !is_session_still_active(state.identity_repository.as_deref(), session_id, state.clock.now()).await {
+                        socket_failed = true;
+                        break;
+                    }
                     let batch = outbound_queue
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -2093,6 +2107,11 @@ async fn run_connected_socket(
             }
             _ = heartbeat_interval.tick() => {
                 let now = state.clock.now();
+                // Also reclaim completely idle revoked connections, without
+                // waiting for another command or another participant's update.
+                if !is_session_still_active(state.identity_repository.as_deref(), session_id, now).await {
+                    break;
+                }
                 if heartbeat.is_timed_out(now) {
                     tracing::warn!(
                         event = "realtime.heartbeat_timeout",

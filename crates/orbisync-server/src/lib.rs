@@ -13,6 +13,7 @@ pub mod command_dedup;
 pub mod delivery;
 pub mod extension_reads;
 pub mod interest_filter;
+pub mod operational_runtime;
 pub mod realtime_ws;
 pub mod runtime_tick;
 pub mod shutdown;

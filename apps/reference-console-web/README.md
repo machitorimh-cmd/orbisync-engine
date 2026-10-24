@@ -60,7 +60,17 @@ ownership transferは、同じInstanceへ参加中の別User IDを入力した�
 
 ```bash
 npm --prefix apps/reference-console-web run check
+npm --prefix apps/reference-console-web test
 npm --prefix apps/reference-console-web run build
 ```
 
 このアプリは外部利用者視点の手動smokeにも使えます。CI無料枠を消費する自動scheduleは設定していません。
+
+WorldとInstanceは「さらに100件読み込む」で1ページずつ追加取得します。
+絞り込みは読み込んだ一覧に対して行い、Instanceは選択したWorldに限定して表示します。
+検索・World選択・接続先の変更で古いcursorを破棄するので、101件目以降は続きを読み込んでください。
+失敗時は一覧とcursorを保持し、同じボタンで再試行できます。各一覧は10,000件・1,000ページまで保持し、
+上限に達した場合は一覧を更新します。接続先変更後は再ログインが必要です。
+
+両参照アプリの画面回帰は、SDKをbuildしwhiteboard依存とPlaywright Chromiumを準備したうえで
+`npm --prefix apps/whiteboard run test:browser`で実行します。REST応答を差し替えるのでCore/DBは不要です。

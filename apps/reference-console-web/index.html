@@ -44,7 +44,9 @@
             <div class="resource-columns">
               <div class="resource-panel">
                 <h3>World</h3>
+                <label>読み込んだ一覧から絞り込み<input id="worldFilter" type="search" placeholder="名前・ID・状態" /></label>
                 <label>選択<select id="worldSelect" disabled><option value="">ログイン後に読み込みます</option></select></label>
+                <div class="actions compact"><button id="moreWorldsBtn" disabled>Worldをさらに100件読み込む</button><span id="worldCount" aria-live="polite">0件</span></div>
                 <div class="inline-fields">
                   <label>名前<input id="worldName" value="reference-world" maxlength="128" /></label>
                   <label class="small-field">定員<input id="worldCapacity" type="number" value="32" min="1" max="1000" /></label>
@@ -56,7 +58,10 @@
               </div>
               <div class="resource-panel">
                 <h3>Instance</h3>
+                <label>読み込んだ一覧から絞り込み<input id="instanceFilter" type="search" placeholder="ID・状態（選択中Worldのみ表示）" /></label>
                 <label>選択<select id="instanceSelect" disabled><option value="">Worldを選択してください</option></select></label>
+                <div class="actions compact"><button id="moreInstancesBtn" disabled>Instanceをさらに100件読み込む</button><span id="instanceCount" aria-live="polite">0件</span></div>
+                <p class="hint">各ボタンで1ページずつ取得します。検索・World変更時は先頭へ戻ります。一覧にない場合は続きを読み込んでください。</p>
                 <div class="inline-fields">
                   <label class="small-field">定員<input id="instanceCapacity" type="number" value="16" min="1" max="1000" /></label>
                   <div class="instance-summary"><small>状態</small><strong id="instanceStatus">—</strong></div>

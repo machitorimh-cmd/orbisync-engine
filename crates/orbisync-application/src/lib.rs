@@ -29,6 +29,10 @@ pub mod metrics;
 pub mod pagination;
 pub mod port;
 pub mod query;
+pub mod session_management;
+pub use session_management::{
+    SessionAccess, SessionManagementPort, SessionSelection, SessionView, validate_device_label,
+};
 pub mod world;
 
 pub use checkpoint::{
@@ -36,8 +40,9 @@ pub use checkpoint::{
     MAX_CHECKPOINT_PAYLOAD_BYTES,
 };
 pub use diagnostics::{
-    OperationalDiagnostics, OperationalDiagnosticsPort, OperationalQueueLimits,
-    OperationalQueueSnapshot, OperationalRateLimitSnapshot, OperationalRetentionSnapshot,
+    OperationalDiagnostics, OperationalDiagnosticsPort, OperationalPersistenceSnapshot,
+    OperationalPresenceSnapshot, OperationalQueueLimits, OperationalQueueSnapshot,
+    OperationalRateLimitSnapshot, OperationalResumeRejections, OperationalRetentionSnapshot,
 };
 pub use entity_persistence::{
     AUDIT_ACTION_ENTITY_OWNERSHIP_TRANSFERRED, EntityOwnershipTransferAudit,
@@ -62,7 +67,8 @@ pub use identity::{
 };
 pub use identity_provider::{
     EphemeralSubjectScope, ExternalAuthError, ExternalIdentity, ExternalIdentityStore,
-    IdentityProvider, ScopeDecision,
+    ExternalKeyAuditStore, ExternalKeyReloadAudit, ExternalKeyReloadSummary, IdentityProvider,
+    ScopeDecision,
 };
 pub use login::{
     EphemeralSubjectRecord, ExternalIdentityRecord, LoginAuditEvent, LoginCommit,

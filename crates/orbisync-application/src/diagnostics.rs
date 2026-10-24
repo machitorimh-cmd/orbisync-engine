@@ -8,6 +8,64 @@ use orbisync_domain::Timestamp;
 
 use crate::ApplicationError;
 
+/// Sampled lifecycle counts. Grace retention is expected; the discrepancy
+/// fields describe ownership/membership anomalies rather than normal reconnects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OperationalPresenceSnapshot {
+    /// Last runtime sampling time; absent before the first sample.
+    pub observed_at: Option<Timestamp>,
+    /// Presences owned by a connected generation.
+    pub connected: u64,
+    /// Disconnected presences still inside their normal grace period.
+    pub grace_waiting: u64,
+    /// Expired or explicitly evicted memberships awaiting Leave acknowledgement.
+    pub reclaim_waiting: u64,
+    /// Memberships currently counted by runtime actors.
+    pub memberships: u64,
+    /// Actor memberships without any lifecycle binding, including grace bindings.
+    pub memberships_without_binding: u64,
+    /// Lifecycle bindings whose membership is missing from the runtime.
+    pub bindings_without_membership: u64,
+    /// Registered joined delivery connections, excluding pre-join transports.
+    pub joined_connections: u64,
+    /// Absolute difference between joined connections and connected owners.
+    /// Short reconnect handoffs can transiently increase this value.
+    pub connection_ownership_mismatch: u64,
+}
+
+/// Work units awaiting persistence. Categories are stages, not unique commands:
+/// an outcome and the checkpoint that makes it durable are separate work units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OperationalPersistenceSnapshot {
+    /// Total units across the categories below.
+    pub pending: u64,
+    /// Age of the oldest unit, zero when no work is pending.
+    pub oldest_pending_seconds: u64,
+    /// Accepted entity effects queued in actors or owned by maintenance workers.
+    pub entity_events: u64,
+    /// Legacy command outcomes awaiting confirmed durability (including dirty outcomes).
+    pub command_outcomes: u64,
+    /// Retained generation snapshots awaiting durable resolution.
+    pub generation_snapshots: u64,
+}
+
+/// Exhaustive bounded counters for rejected Resume attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OperationalResumeRejections {
+    /// Hello and Resume tokens disagree or the request has no usable token.
+    pub token_mismatch: u64,
+    /// Token, instance, or retained history is unavailable.
+    pub history_unavailable: u64,
+    /// The requested history fell outside retention.
+    pub revision_gap: u64,
+    /// The client revision exceeds the server's revision.
+    pub future_revision: u64,
+    /// Current participation authorization was denied.
+    pub not_authorized: u64,
+    /// The presence was retired or rebound before Resume could claim it.
+    pub ownership_lost: u64,
+}
+
 /// Configured queue limits included beside observed queue depths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationalQueueLimits {
@@ -90,6 +148,12 @@ pub struct OperationalDiagnostics {
     pub queue_limits: OperationalQueueLimits,
     /// Current accepted realtime connections.
     pub active_connections: i64,
+    /// Sampled Presence lifecycle and consistency counts.
+    pub presence: OperationalPresenceSnapshot,
+    /// Pending persistence work and its oldest age.
+    pub persistence: OperationalPersistenceSnapshot,
+    /// Resume rejection counts since process start.
+    pub resume_rejections: OperationalResumeRejections,
     /// Rate-limit rejection totals since process start.
     pub rate_limit_rejections: OperationalRateLimitSnapshot,
     /// Pending extension outbox events.

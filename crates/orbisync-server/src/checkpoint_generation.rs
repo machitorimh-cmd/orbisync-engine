@@ -9,7 +9,10 @@ use orbisync_domain::{InstanceId, Timestamp};
 use orbisync_storage_postgres::generation_execution::{self as execution, Execution};
 use orbisync_world_runtime::checkpoint::stream::{DecodeJob, EncodedCheckpoint, StreamStats};
 use orbisync_world_runtime::{Checkpoint, InstanceHandle};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicI64, Ordering},
+};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -55,7 +58,13 @@ pub struct GenerationServices {
     pub(crate) operator_stage: Mutex<Option<&'static str>>,
     last_conversion: Mutex<Option<GenerationAttempt>>,
     snapshots: Arc<Semaphore>,
-    retained: Mutex<std::collections::HashMap<InstanceId, tokio::sync::OwnedSemaphorePermit>>,
+    retained: Mutex<
+        std::collections::HashMap<
+            InstanceId,
+            (tokio::sync::OwnedSemaphorePermit, std::time::Instant),
+        >,
+    >,
+    latest_checkpoint: AtomicI64,
     publications: Mutex<Publications>,
     projection_cursor: tokio::sync::Mutex<Option<InstanceId>>,
 }
@@ -84,6 +93,7 @@ impl GenerationServices {
             last_conversion: Mutex::new(None),
             snapshots: Arc::new(Semaphore::new(2)),
             retained: Mutex::new(Default::default()),
+            latest_checkpoint: AtomicI64::new(0),
             publications: Mutex::new(Default::default()),
             projection_cursor: tokio::sync::Mutex::new(None),
         }))
@@ -107,6 +117,10 @@ impl GenerationServices {
             .or_insert_with(|| Box::new(publish));
     }
     fn publish_committed(&self, checkpoint: &Checkpoint, now: i64) {
+        self.latest_checkpoint.fetch_max(
+            checkpoint.timestamp.to_unix_millis().unwrap_or(0) / 1000,
+            Ordering::Relaxed,
+        );
         let callbacks: Vec<_> = {
             let mut pending = self.publications.lock().unwrap_or_else(|e| e.into_inner());
             checkpoint
@@ -128,11 +142,12 @@ impl GenerationServices {
         if let std::collections::hash_map::Entry::Vacant(entry) = retained.entry(instance) {
             // Never occupy both work jobs waiting for uncertain snapshots; retry
             // owners must still be able to enter and resolve their fixed attempt.
-            entry.insert(
+            entry.insert((
                 Arc::clone(&self.snapshots)
                     .try_acquire_owned()
                     .map_err(|_| unavailable())?,
-            );
+                std::time::Instant::now(),
+            ));
         }
         Ok(())
     }
@@ -141,6 +156,25 @@ impl GenerationServices {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&instance);
+    }
+    /// Retained snapshots still awaiting durable resolution, including uncertain
+    /// commits. Monotonic age survives foreground request retries.
+    #[must_use]
+    pub fn pending_persistence(&self) -> (u64, u64) {
+        let retained = self.retained.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            retained.len() as u64,
+            retained
+                .values()
+                .map(|(_, since)| since.elapsed().as_secs())
+                .max()
+                .unwrap_or(0),
+        )
+    }
+    /// Latest generation checkpoint confirmed durable by this process.
+    #[must_use]
+    pub fn latest_checkpoint_unix_seconds(&self) -> i64 {
+        self.latest_checkpoint.load(Ordering::Relaxed)
     }
     /// Serialize fresh WS preparation with early receipt lookup across connections.
     pub async fn command_guard(&self, instance: InstanceId) -> tokio::sync::OwnedMutexGuard<()> {

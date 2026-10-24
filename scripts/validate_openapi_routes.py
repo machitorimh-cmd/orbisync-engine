@@ -45,8 +45,8 @@ PLANNED = ROOT / "openapi" / "orbisync-v1-planned.yaml"
 # deliberately added to the design (planned -> implemented or brand new path).
 # Implemented + planned must always sum to this so no design is lost.
 # Original routes plus authentication, admin permission probe, diagnostics and extension commands.
-ORIGINAL_PATHS = 37
-ORIGINAL_OPS = 46
+ORIGINAL_PATHS = 44
+ORIGINAL_OPS = 55
 
 
 def load_yaml_operations(path: Path) -> set[tuple[str, str]]:

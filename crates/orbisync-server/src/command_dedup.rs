@@ -103,6 +103,25 @@ impl Default for CommandDedupStore {
 }
 
 impl CommandDedupStore {
+    /// Persistence work, excluding admission-only reservations and completed
+    /// outcomes. Age starts at command admission, including execution time.
+    #[must_use]
+    pub fn pending_persistence(&self, now_millis: i64) -> (u64, u64) {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut count = 0_u64;
+        let mut oldest = 0_u64;
+        for entry in inner.entries.values().flat_map(HashMap::values) {
+            if matches!(
+                entry.state,
+                EntryState::Pending(Some(_)) | EntryState::Dirty(_)
+            ) {
+                count += 1;
+                oldest =
+                    oldest.max(now_millis.saturating_sub(entry.created_at).max(0) as u64 / 1000);
+            }
+        }
+        (count, oldest)
+    }
     /// The default maximum number of retained IDs for one instance.
     pub const DEFAULT_CAPACITY_PER_INSTANCE: usize = 4_096;
     /// The contractual retention period for completed command results.
@@ -772,6 +791,31 @@ impl CommandDedupWaiter {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_persistence_ignores_admission_and_retains_dirty_age() {
+        let store = CommandDedupStore::default();
+        let instance = InstanceId::generate();
+        let id = CommandId::generate();
+        let request = command(&id, "spawn");
+        let CommandDedupAdmission::Leader(mut reservation) = store.begin(
+            instance,
+            id,
+            CommandDedupStore::fingerprint(&request),
+            1_000,
+        ) else {
+            panic!("leader")
+        };
+        assert_eq!(store.pending_persistence(6_000), (0, 0));
+        let outcome = CommandDedupResult::Applied {
+            command: request,
+            message_id: "stable".to_owned(),
+        };
+        reservation.set_outcome(outcome.clone());
+        assert_eq!(store.pending_persistence(6_000), (1, 5));
+        reservation.mark_dirty(outcome);
+        assert_eq!(store.pending_persistence(10_000), (1, 9));
+    }
 
     #[test]
     fn server_boundary_is_excluded_from_request_fingerprint() {

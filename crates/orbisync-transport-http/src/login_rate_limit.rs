@@ -2,9 +2,60 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use orbisync_application::metrics::RateLimitScope;
+use orbisync_domain::AuthMethod;
 use time::{Duration, OffsetDateTime};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// Initial authentication admission policy, shared by all four methods.
+/// Counters and concurrency are process-local; deployment-wide budgets must
+/// divide the desired total across replicas or be enforced at the ingress.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthIssuanceLimits {
+    /// Attempts per source IP across all initial authentication methods.
+    pub per_ip_per_minute: u32,
+    /// Attempts per IP for local, guest, name-only and external, in that order.
+    pub per_method_per_minute: [u32; 4],
+    /// Maximum simultaneous initial authentication operations.
+    pub max_concurrent: u32,
+    /// Total guest/name-only attempts per minute, including failed attempts.
+    pub temporary_subjects_per_minute: u32,
+}
+
+impl Default for AuthIssuanceLimits {
+    fn default() -> Self {
+        Self {
+            per_ip_per_minute: 60,
+            per_method_per_minute: [10, 30, 30, 30],
+            max_concurrent: 32,
+            temporary_subjects_per_minute: 1_000,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IssuanceBucket {
+    started: OffsetDateTime,
+    total: u32,
+    methods: [u32; 4],
+}
+
+#[derive(Debug, Default)]
+struct IssuanceCounters {
+    ips: HashMap<Option<IpAddr>, IssuanceBucket>,
+    temporary: Option<(OffsetDateTime, u32)>,
+}
+
+/// Rejected admission, with bounded metrics scope and a positive retry delay.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthIssuanceRejection {
+    /// Rejection category; never contains user, IP or token labels.
+    pub scope: RateLimitScope,
+    /// Seconds before retrying may succeed.
+    pub retry_after_seconds: u64,
+}
 
 #[derive(Debug)]
 struct Bucket {
@@ -35,6 +86,9 @@ pub struct LoginRateLimiter {
     block_duration: Duration,
     max_buckets: usize,
     buckets: Mutex<HashMap<Option<IpAddr>, Bucket>>,
+    issuance_limits: AuthIssuanceLimits,
+    issuance_slots: Arc<Semaphore>,
+    issuance_counters: Mutex<IssuanceCounters>,
 }
 
 impl LoginRateLimiter {
@@ -57,7 +111,109 @@ impl LoginRateLimiter {
             block_duration: Duration::seconds(block_seconds),
             max_buckets,
             buckets: Mutex::new(HashMap::new()),
+            issuance_limits: AuthIssuanceLimits::default(),
+            issuance_slots: Arc::new(Semaphore::new(
+                AuthIssuanceLimits::default().max_concurrent as usize,
+            )),
+            issuance_counters: Mutex::new(IssuanceCounters::default()),
         }
+    }
+
+    /// Configures shared initial-authentication admission before serving requests.
+    #[must_use]
+    pub fn with_issuance_limits(mut self, limits: AuthIssuanceLimits) -> Self {
+        assert!(
+            limits.per_ip_per_minute > 0 && limits.per_method_per_minute.iter().all(|v| *v > 0)
+        );
+        assert!(
+            (1..=65_536).contains(&limits.max_concurrent)
+                && limits.temporary_subjects_per_minute > 0
+        );
+        self.issuance_slots = Arc::new(Semaphore::new(limits.max_concurrent as usize));
+        self.issuance_limits = limits;
+        self
+    }
+
+    /// Admits one complete initial-authentication operation. Hold the returned
+    /// permit until all cryptographic and database work has finished. Unknown
+    /// peers share one bucket. A full IP table rejects new sources instead of
+    /// evicting live counters (which would let source rotation bypass limits).
+    pub fn acquire_issuance(
+        &self,
+        method: AuthMethod,
+        source_ip: Option<IpAddr>,
+        now: OffsetDateTime,
+    ) -> Result<OwnedSemaphorePermit, AuthIssuanceRejection> {
+        let permit = Arc::clone(&self.issuance_slots)
+            .try_acquire_owned()
+            .map_err(|_| AuthIssuanceRejection {
+                scope: RateLimitScope::AuthConcurrency,
+                retry_after_seconds: 1,
+            })?;
+        let mut counters = self
+            .issuance_counters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let window = Duration::minutes(1);
+        counters
+            .ips
+            .retain(|_, bucket| now - bucket.started < window);
+        let index = match method {
+            AuthMethod::Local => 0,
+            AuthMethod::Guest => 1,
+            AuthMethod::NameOnly => 2,
+            AuthMethod::External => 3,
+        };
+        if !counters.ips.contains_key(&source_ip) && counters.ips.len() >= self.max_buckets {
+            let retry = counters
+                .ips
+                .values()
+                .map(|b| retry_after_seconds(now, b.started + window))
+                .min()
+                .unwrap_or(1)
+                .max(1);
+            return Err(AuthIssuanceRejection {
+                scope: RateLimitScope::Ip,
+                retry_after_seconds: retry,
+            });
+        }
+        if let Some(bucket) = counters.ips.get(&source_ip) {
+            let retry = retry_after_seconds(now, bucket.started + window).max(1);
+            if bucket.total >= self.issuance_limits.per_ip_per_minute {
+                return Err(AuthIssuanceRejection {
+                    scope: RateLimitScope::Ip,
+                    retry_after_seconds: retry,
+                });
+            }
+            if bucket.methods[index] >= self.issuance_limits.per_method_per_minute[index] {
+                return Err(AuthIssuanceRejection {
+                    scope: RateLimitScope::AuthMethod,
+                    retry_after_seconds: retry,
+                });
+            }
+        }
+        if matches!(method, AuthMethod::Guest | AuthMethod::NameOnly) {
+            let (started, count) = counters.temporary.get_or_insert((now, 0));
+            if now - *started >= window {
+                *started = now;
+                *count = 0;
+            }
+            if *count >= self.issuance_limits.temporary_subjects_per_minute {
+                return Err(AuthIssuanceRejection {
+                    scope: RateLimitScope::TemporarySubjectBudget,
+                    retry_after_seconds: retry_after_seconds(now, *started + window).max(1),
+                });
+            }
+            *count += 1;
+        }
+        let bucket = counters.ips.entry(source_ip).or_insert(IssuanceBucket {
+            started: now,
+            total: 0,
+            methods: [0; 4],
+        });
+        bucket.total += 1;
+        bucket.methods[index] += 1;
+        Ok(permit)
     }
 
     /// Creates the production defaults from the A-4 specification.
@@ -274,5 +430,78 @@ mod tests {
         let t = now();
         assert!(limiter.check_and_record(None, t).allowed);
         assert!(!limiter.check_and_record(None, t).allowed);
+    }
+
+    fn issuance_limits() -> super::AuthIssuanceLimits {
+        super::AuthIssuanceLimits {
+            per_ip_per_minute: 3,
+            per_method_per_minute: [2; 4],
+            max_concurrent: 2,
+            temporary_subjects_per_minute: 3,
+        }
+    }
+
+    #[test]
+    fn issuance_method_ip_and_global_temporary_limits_are_independent() {
+        use orbisync_application::metrics::RateLimitScope;
+        use orbisync_domain::AuthMethod::{External, Guest, Local, NameOnly};
+        let limiter = LoginRateLimiter::new(100, 300, 10).with_issuance_limits(issuance_limits());
+        let t = now();
+        drop(limiter.acquire_issuance(Guest, ip(1), t).unwrap());
+        drop(limiter.acquire_issuance(Guest, ip(1), t).unwrap());
+        let rejected = limiter.acquire_issuance(Guest, ip(1), t).unwrap_err();
+        assert_eq!(rejected.scope, RateLimitScope::AuthMethod);
+        assert_eq!(rejected.retry_after_seconds, 60);
+        drop(limiter.acquire_issuance(External, ip(1), t).unwrap());
+        assert_eq!(
+            limiter.acquire_issuance(Local, ip(1), t).unwrap_err().scope,
+            RateLimitScope::Ip
+        );
+        drop(limiter.acquire_issuance(NameOnly, ip(2), t).unwrap());
+        assert_eq!(
+            limiter.acquire_issuance(Guest, ip(3), t).unwrap_err().scope,
+            RateLimitScope::TemporarySubjectBudget
+        );
+        // A guest flood exhausting the temporary budget does not stop permanent authentication.
+        drop(limiter.acquire_issuance(Local, ip(3), t).unwrap());
+        drop(
+            limiter
+                .acquire_issuance(Guest, ip(1), t + time::Duration::minutes(1))
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn issuance_permits_bound_all_methods_and_are_released_on_cancellation() {
+        use orbisync_domain::AuthMethod::{External, Guest, Local};
+        let limiter = LoginRateLimiter::new(100, 300, 10).with_issuance_limits(issuance_limits());
+        let a = limiter.acquire_issuance(Guest, ip(1), now()).unwrap();
+        let b = limiter.acquire_issuance(External, ip(2), now()).unwrap();
+        assert_eq!(
+            limiter
+                .acquire_issuance(Local, ip(3), now())
+                .unwrap_err()
+                .scope,
+            orbisync_application::metrics::RateLimitScope::AuthConcurrency
+        );
+        drop(a);
+        drop(limiter.acquire_issuance(Local, ip(3), now()).unwrap());
+        drop(b);
+    }
+
+    #[test]
+    fn issuance_bucket_bound_never_evicts_live_limits_or_allows_source_rotation() {
+        use orbisync_domain::AuthMethod::Guest;
+        let limiter = LoginRateLimiter::new(100, 300, 2).with_issuance_limits(issuance_limits());
+        drop(limiter.acquire_issuance(Guest, ip(1), now()).unwrap());
+        drop(limiter.acquire_issuance(Guest, ip(2), now()).unwrap());
+        assert!(limiter.acquire_issuance(Guest, ip(3), now()).is_err());
+        drop(limiter.acquire_issuance(Guest, ip(1), now()).unwrap());
+        assert!(limiter.acquire_issuance(Guest, ip(1), now()).is_err());
+        drop(
+            limiter
+                .acquire_issuance(Guest, ip(3), now() + time::Duration::minutes(1))
+                .unwrap(),
+        );
     }
 }

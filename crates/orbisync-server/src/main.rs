@@ -328,6 +328,7 @@ struct AuthMethodServices {
     ephemeral: Option<Arc<orbisync_identity::EphemeralSubjectService>>,
     /// External identity service, when the method is enabled.
     external: Option<Arc<orbisync_identity::ExternalAuthService>>,
+    external_keys: Option<Arc<orbisync_identity::JwtIdentityProvider>>,
     /// Participation boundary for existing subjects, independent of issuance.
     scope: Arc<dyn orbisync_application::EphemeralSubjectScope>,
 }
@@ -443,7 +444,7 @@ async fn build_auth_method_services(
     let scope: Arc<dyn orbisync_application::EphemeralSubjectScope> =
         Arc::new(PgEphemeralSubjectScope::new(pool.clone()));
 
-    let external = if enabled.contains(&orbisync_domain::AuthMethod::External) {
+    let (external, external_keys) = if enabled.contains(&orbisync_domain::AuthMethod::External) {
         let settings = &config.auth.external;
         if settings.issuer == INTERNAL_TOKEN_ISSUER {
             return Err(ServerError::Config(ConfigError::new(
@@ -453,32 +454,37 @@ async fn build_auth_method_services(
                  token this server minted would be accepted as an external login",
             )));
         }
-        let provider = orbisync_identity::JwtIdentityProvider::from_jwks_file(
-            Path::new(&settings.jwks_path),
-            settings.issuer.clone(),
-            settings.audience.clone(),
-            &settings.algorithm,
-            settings.leeway_seconds,
-        )
-        .map_err(|error| {
-            ServerError::Config(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                "auth.external.jwks_path",
-                error.detail().to_owned(),
-            ))
-        })?;
+        let provider = Arc::new(
+            orbisync_identity::JwtIdentityProvider::from_jwks_file(
+                Path::new(&settings.jwks_path),
+                settings.issuer.clone(),
+                settings.audience.clone(),
+                &settings.algorithm,
+                settings.leeway_seconds,
+            )
+            .map_err(|error| {
+                ServerError::Config(ConfigError::new(
+                    ConfigErrorKind::InvalidValue,
+                    "auth.external.jwks_path",
+                    error.detail().to_owned(),
+                ))
+            })?,
+        );
         let grant_roles = resolve_ephemeral_roles(pool, "external", &settings.role_names)
             .await
             .map_err(|error| auth_config_error(error.detail().to_owned()))?;
-        Some(Arc::new(orbisync_identity::ExternalAuthService::new(
-            Arc::new(provider) as Arc<dyn orbisync_application::IdentityProvider>,
-            Arc::new(PgExternalIdentityStore::new(pool.clone()))
-                as Arc<dyn orbisync_application::ExternalIdentityStore>,
-            Arc::clone(session_issuer),
-            grant_roles,
-        )))
+        (
+            Some(Arc::new(orbisync_identity::ExternalAuthService::new(
+                Arc::clone(&provider) as Arc<dyn orbisync_application::IdentityProvider>,
+                Arc::new(PgExternalIdentityStore::new(pool.clone()))
+                    as Arc<dyn orbisync_application::ExternalIdentityStore>,
+                Arc::clone(session_issuer),
+                grant_roles,
+            ))),
+            Some(provider),
+        )
     } else {
-        None
+        (None, None)
     };
 
     tracing::info!(
@@ -491,6 +497,7 @@ async fn build_auth_method_services(
         enabled,
         ephemeral,
         external,
+        external_keys,
         scope,
     })
 }
@@ -882,6 +889,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 }
                 let token_service = Arc::new(create_token_service(&env, &config)?);
                 let clock: Arc<dyn orbisync_domain::Clock> = Arc::new(SystemClock::new());
+                let persistence_backlog = Arc::new(orbisync_server::operational_runtime::PersistenceBacklog::new(Arc::clone(&clock)));
                 // D1-A metrics: Prometheus implementation, shared for recorder + exporter.
                 let prometheus_metrics = Arc::new(PrometheusMetrics::new());
                 let metrics_recorder: Arc<dyn MetricsRecorder> =
@@ -984,6 +992,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                     let query_store =
                         Arc::new(PgIdentityQueryStore::new(pool.clone(), &config, &env)?);
                     let identity_query: Arc<dyn IdentityQueryPort> = query_store.clone();
+                    let session_management = Arc::new(orbisync_storage_postgres::PgSessionManagementStore::new(pool.clone(), query_store.cursor_codec()));
                     let audit_query: Arc<dyn AuditQueryPort> = query_store;
                     let refresh_rotation_store: Arc<
                         dyn orbisync_application::RefreshTokenRotationStore,
@@ -1077,7 +1086,12 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                             config.rate_limit.login_per_ip_per_minute,
                             config.rate_limit.login_ip_block_seconds,
                             config.rate_limit.login_ip_max_buckets,
-                        ),
+                        ).with_issuance_limits(orbisync_transport_http::login_rate_limit::AuthIssuanceLimits {
+                            per_ip_per_minute: config.rate_limit.auth_issuance_ip_per_minute,
+                            per_method_per_minute: [config.rate_limit.auth_issuance_local_per_minute, config.rate_limit.auth_issuance_guest_per_minute, config.rate_limit.auth_issuance_name_only_per_minute, config.rate_limit.auth_issuance_external_per_minute],
+                            max_concurrent: config.rate_limit.auth_issuance_max_concurrent,
+                            temporary_subjects_per_minute: config.rate_limit.auth_temporary_subjects_per_minute,
+                        }),
                     );
                     // P2-C4: login service owns the transactional boundary
                     let login_service = Arc::new(orbisync_identity::LoginService::new(
@@ -1144,6 +1158,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                     .with_identity_admin_service(admin_service)
                     .with_identity_query(identity_query)
                     .with_audit_query(audit_query)
+                    .with_session_management(session_management)
                     .with_refresh_creation_store(refresh_creation_store)
                     .with_refresh_rotation_store(refresh_rotation_store)
                     .with_idempotency_store(idempotency_store)
@@ -1161,7 +1176,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                     .with_trusted_proxies(trusted_proxy_entries)
                     .with_metrics_recorder(Arc::clone(&metrics_recorder))
                     .with_metrics_exporter(Arc::clone(&metrics_exporter))
-                    .with_operational_diagnostics(operational_diagnostics);
+                    .with_operational_diagnostics(Arc::clone(&operational_diagnostics));
                     (state, auth_methods)
                 };
                 let runtime_registry = Arc::new(orbisync_world_runtime::RuntimeRegistry::new());
@@ -1189,8 +1204,12 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                         Some(service) => http_state.with_ephemeral_subject_service(service),
                         None => http_state,
                     };
-                    match auth_methods.external.clone() {
+                    let http_state = match auth_methods.external.clone() {
                         Some(service) => http_state.with_external_auth_service(service),
+                        None => http_state,
+                    };
+                    match auth_methods.external_keys.clone() {
+                        Some(provider) => http_state.with_external_key_management(provider, Arc::new(orbisync_storage_postgres::PgExternalKeyAuditStore::new(pool.clone()))),
                         None => http_state,
                     }
                 };
@@ -1283,6 +1302,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 // `PgCheckpointStore` after each save.
                 let tick_task = if generation.is_some() { Some({
                     let tick_generation = generation.clone();
+                    let tick_backlog = Arc::clone(&persistence_backlog);
                     let tick_shutdown = Arc::clone(&shutdown);
                     let tick_registry = Arc::clone(&runtime_registry);
                     let tick_delivery = Arc::clone(&delivery_registry);
@@ -1354,6 +1374,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                                 let storage_permits = Arc::clone(&storage_permits);
                                 let extension_store = Arc::clone(&tick_extension_store);
                                 let entity_store = Arc::clone(&tick_persistent_entity_store);
+                                let backlog = Arc::clone(&tick_backlog);
                                 async move {
                                     let Some(instance_id) = instance else {
                                         let Ok(_storage) = storage_permits.acquire().await else {
@@ -1444,7 +1465,11 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                                     // Preserve the drained batch order within each instance;
                                     // different instances no longer wait for each other's I/O.
                                     persist_extension_events(extension_store.as_ref(), pending_events).await;
-                                    persist_entity_events(entity_store.as_ref(), metrics.as_ref(), pending_persistence_events).await;
+                                    let pending = backlog.track(pending_persistence_events.len());
+                                    for event in pending_persistence_events {
+                                        persist_entity_events(entity_store.as_ref(), metrics.as_ref(), vec![event]).await;
+                                        pending.complete_one();
+                                    }
                                     Vec::new()
                                 }
                             });
@@ -1465,6 +1490,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 let runtime_workers = if generation.is_none() {
                     Some(runtime_maintenance::RuntimeWorkers::spawn(
                         runtime_maintenance::MaintenanceServices {
+                            pending_persistence: Arc::clone(&persistence_backlog),
                             registry: Arc::clone(&runtime_registry),
                             delivery: Arc::clone(&delivery_registry),
                             checkpoints: Arc::clone(&checkpoint_store),
@@ -1721,13 +1747,34 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 // Transform auto-create would be allowed until the first
                 // periodic refresh completed, 15 seconds after boot.
                 realtime_state.refresh_spawn_hook_active_cache().await;
+                let mut operational_tasks = orbisync_server::operational_runtime::OperationalTasks::default();
+                realtime_state.refresh_operational_metrics(&persistence_backlog);
+                {
+                    let diagnostic_state = Arc::clone(&realtime_state);
+                    let diagnostic_backlog = Arc::clone(&persistence_backlog);
+                    let diagnostic_source = Arc::clone(&operational_diagnostics);
+                    operational_tasks.push(tokio::spawn(async move {
+                        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+                        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            ticker.tick().await;
+                            diagnostic_state.refresh_operational_metrics(&diagnostic_backlog);
+                            match tokio::time::timeout(std::time::Duration::from_secs(2), diagnostic_source.snapshot()).await {
+                                Ok(Ok(_)) => {},
+                                Ok(Err(error)) => tracing::warn!(event="operational_diagnostics.refresh_failed", error_kind=%error.kind()),
+                                Err(_) => tracing::warn!(event="operational_diagnostics.refresh_deadline_exceeded"),
+                            }
+                        }
+                    }));
+                }
                 // D-26 keeps disconnected presences for resume, but expired
                 // bindings must be reclaimed or they retain membership slots
                 // forever. Run at half the configured grace period so expiry is
                 // observed promptly without introducing another fixed cadence.
                 {
                     let prune_state = Arc::clone(&realtime_state);
-                    tokio::spawn(async move {
+                    let prune_backlog = Arc::clone(&persistence_backlog);
+                    operational_tasks.push(tokio::spawn(async move {
                         let interval = std::time::Duration::from_secs(
                             prune_state.resume_prune_interval_seconds(),
                         );
@@ -1737,6 +1784,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                         loop {
                             ticker.tick().await;
                             let removed = prune_state.prune_expired_resume_sessions_async().await;
+                            prune_state.refresh_operational_metrics(&prune_backlog);
                             if removed > 0 {
                                 tracing::info!(
                                     event = "realtime.resume_bindings_pruned",
@@ -1745,7 +1793,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                                 );
                             }
                         }
-                    });
+                    }));
                 }
                 {
                     let extension_cache_store = Arc::clone(&extension_store);
@@ -1823,6 +1871,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 }
                 // 7. Axum has finished its graceful listener/in-flight request
                 // shutdown; only now close the database pool.
+                operational_tasks.stop().await;
                 if let Some(owner) = generation_ownership { owner.shutdown().await; }
                 pool.close().await;
                 tracing::info!(event = "database.pool_closed");

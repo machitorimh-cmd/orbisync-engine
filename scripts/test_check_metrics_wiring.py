@@ -186,8 +186,8 @@ class MetricsWiringTests(unittest.TestCase):
     def test_real_workspace_is_green(self) -> None:
         # The real workspace should have all mailbox and baseline variants wired.
         variants = checker.parse_metrics_variants(REAL_ROOT)
-        self.assertEqual(len(variants["Counter"]), 24)
-        self.assertEqual(len(variants["Gauge"]), 9)
+        self.assertEqual(len(variants["Counter"]), 25)
+        self.assertEqual(len(variants["Gauge"]), 10)
         self.assertEqual(len(variants["Histogram"]), 5)
         errors, _ = checker.check_variant_wiring(REAL_ROOT)
         self.assertEqual(errors, [], f"gate must be green on real workspace, got {errors}")

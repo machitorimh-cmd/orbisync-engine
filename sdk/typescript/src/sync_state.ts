@@ -18,6 +18,7 @@ export type SyncedEntity = {
   revision: bigint;
   instanceRevision: bigint;
   kind?: string;
+  ownerId?: string;
   transform?: StateObject;
   velocity?: StateObject;
   animation?: StateObject;
@@ -281,6 +282,7 @@ export class SyncStore {
       if (typeof item.kind !== "string") throw new SyncError("INVALID_SNAPSHOT");
       record.value.kind = item.kind;
       record.fields.set("kind", boundary);
+      if (item.owner != null) { record.value.ownerId = id(item.owner); record.fields.set("ownerId", boundary); }
       for (const key of ["transform", "velocity", "animation", "presence"] as const) {
         if (item[key] != null) {
           let data = object(item[key]);
@@ -382,7 +384,7 @@ export class SyncStore {
     if (command.instanceRevision === undefined) throw new SyncError("UNSUPPORTED_SERVER");
     const boundary = uint64(command.instanceRevision, "INVALID_UPDATE");
     const entityId = id(command.entityId, "INVALID_UPDATE");
-    if (!["spawn", "update", "delete"].includes(command.operation)) throw new SyncError("INVALID_UPDATE");
+    if (!["spawn", "update", "delete", "transfer_ownership"].includes(command.operation)) throw new SyncError("INVALID_UPDATE");
     if (boundary <= this.boundary || boundary <= (this.tombstones.get(entityId) ?? -1n)) return [];
     const revision = uint64(command.expectedRevision, "INVALID_UPDATE");
     this.revision = this.revision > boundary ? this.revision : boundary;
@@ -424,6 +426,8 @@ export class SyncStore {
         }, boundary) || changed;
       }
       // Arbitrary spawn arguments are echoed, NOT persisted custom components.
+    } else if (command.operation === "transfer_ownership") {
+      changed = this.set(record, "ownerId", args.new_owner_id == null ? undefined : id(args.new_owner_id, "INVALID_UPDATE"), boundary);
     } else {
       const key = id(args.component_key ?? args.key ?? "entity.component", "INVALID_UPDATE");
       if (!key.includes(".") || key.startsWith("core.")) throw new SyncError("INVALID_UPDATE");

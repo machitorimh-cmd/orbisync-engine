@@ -8,6 +8,15 @@
 
 ### Added
 
+- 全認証方式のIP・方式別発行制限、同時発行上限、一時主体の発行予算と429再試行目安
+- 自分と管理対象ユーザーのセッション一覧、端末表示名、個別失効・現在以外の失効。失効後は既存WebSocketも停止
+- Presenceの所有不整合、猶予・回収待ち、永続化の待ち時間、Resume失敗理由を運用画面・メトリクスに追加し、Prometheusアラート例とテストを配布
+- TypeScript SDKの汎用EntityCommand確定待ち・結果不明の追跡と、同一ID・要求内容による明示的な再送
+- 監査ログの複合検索、フィルターに束縛された精密カーソル、秘密情報の除去とCSV式対策を施したページ単位のJSON・CSV出力
+- 設定済みローカルJWKSの検証・監査・原子的な再読み込み。既存の鍵は不正なファイルや監査障害で置換しない
+- 参照ConsoleとwhiteboardのWorld・Instance追加取得、接続先・検索条件変更時のリセットと競合対策
+- 上記運用機能にはmigration 0024～0026が必要。既存の監査カーソルは更新後に検索の先頭から取得し直す
+
 Milestone 1 以降で追加された機能。詳細は [`docs/design/roadmap-and-traceability.md`](docs/design/roadmap-and-traceability.md) §3.1 の受入マトリクスを参照。
 
 - 認証と識別: Argon2id パスワード検証、Ed25519 署名 access token、opaque refresh token の発行・ローテーション・再利用検知、ログイン失敗によるロックアウト
@@ -29,6 +38,8 @@ Milestone 1 以降で追加された機能。詳細は [`docs/design/roadmap-and
 
 ### Fixed
 
+- SDKの正常切断後に同期状態がreadyのまま残り、未確定コマンドを送信できた問題を修正
+- JWT暗号処理をAWS-LCへ切り替えて旧RustCrypto依存とRSAの監査除外を削除し、Tokio・WebPKI・ルート証明書を脆弱性修正版へ更新
 - ログイン確定とパスワード再設定・ユーザー無効化の競合、非ローカル主体の管理操作、Argon2設定変更後の再ハッシュ判定を修正
 - SDKの認証方式切替と管理Consoleの接続先変更時に、古い非同期応答が認証情報を上書きする問題を修正
 - Resume token失効後のPresence回収、旧接続の終了処理、一時主体失効後のイベント認可、複数EntityのInterest購読維持を修正

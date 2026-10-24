@@ -2,16 +2,21 @@
 //!
 //! Implements `orbisync_application::metrics` ports via `prometheus-client`.
 
+use orbisync_application::diagnostics::{
+    OperationalPersistenceSnapshot, OperationalPresenceSnapshot, OperationalResumeRejections,
+};
 use orbisync_application::metrics::{
     Counter, Gauge, Histogram, HttpMethod, MailboxQueue, MetricsExporter, MetricsRecorder,
-    RateLimitScope,
+    OperationalGauge, RateLimitScope, ResumeRejectReason,
 };
+use orbisync_domain::Timestamp;
 use prometheus_client::encoding::text::{encode_eof, encode_registry};
 use prometheus_client::metrics::counter::Counter as Pcounter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge as Pgauge;
 use prometheus_client::metrics::histogram::Histogram as Phistogram;
 use prometheus_client::registry::Registry;
+use std::collections::HashMap;
 #[cfg(windows)]
 use std::mem::size_of;
 use std::sync::RwLock;
@@ -37,6 +42,8 @@ fn visible_set_size_histogram() -> Phistogram {
 #[allow(clippy::type_complexity)]
 pub struct PrometheusMetrics {
     registry: RwLock<Registry>,
+    operational: HashMap<OperationalGauge, Pgauge>,
+    resume_rejected: Family<Vec<(String, String)>, Pcounter>,
     http_requests: Family<Vec<(String, String)>, Pcounter>,
     http_duration: Family<Vec<(String, String)>, Phistogram, fn() -> Phistogram>,
     auth_failures: Pcounter,
@@ -82,6 +89,12 @@ pub struct PrometheusMetrics {
 /// snapshot avoids reparsing its text exposition inside the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OperationalMetricsSnapshot {
+    /// Sampled lifecycle consistency counts.
+    pub presence: OperationalPresenceSnapshot,
+    /// Sampled persistence work.
+    pub persistence: OperationalPersistenceSnapshot,
+    /// Bounded Resume rejection totals.
+    pub resume_rejections: OperationalResumeRejections,
     /// Checkpoint save errors since process start.
     pub checkpoint_save_failures_total: u64,
     /// Checkpoint restore errors since process start.
@@ -133,6 +146,30 @@ impl PrometheusMetrics {
     #[must_use]
     pub fn new() -> Self {
         let mut registry = Registry::default();
+        let operational = OperationalGauge::ALL
+            .into_iter()
+            .map(|kind| {
+                let gauge = Pgauge::default();
+                registry.register(
+                    kind.as_str(),
+                    "Sampled operational state (fixed vocabulary)",
+                    gauge.clone(),
+                );
+                (kind, gauge)
+            })
+            .collect();
+        let resume_rejected = Family::<Vec<(String, String)>, Pcounter>::default();
+        registry.register(
+            "resume_rejections",
+            "Rejected Resume attempts by bounded reason",
+            resume_rejected.clone(),
+        );
+        for reason in ResumeRejectReason::ALL {
+            drop(
+                resume_rejected
+                    .get_or_create(&vec![("reason".to_owned(), reason.as_str().to_owned())]),
+            );
+        }
 
         let http_requests = Family::<Vec<(String, String)>, Pcounter>::default();
         registry.register(
@@ -382,6 +419,8 @@ impl PrometheusMetrics {
 
         Self {
             registry: RwLock::new(registry),
+            operational,
+            resume_rejected,
             http_requests,
             http_duration,
             auth_failures,
@@ -439,7 +478,43 @@ impl PrometheusMetrics {
             let labels = vec![("scope".to_owned(), scope.as_str().to_owned())];
             self.rate_limit_rejected.get_or_create(&labels).get()
         };
+        let gauge = |kind| self.operational.get(&kind).map_or(0, Pgauge::get).max(0) as u64;
+        let resume = |reason: ResumeRejectReason| {
+            self.resume_rejected
+                .get_or_create(&vec![("reason".to_owned(), reason.as_str().to_owned())])
+                .get()
+        };
+        use OperationalGauge as O;
         OperationalMetricsSnapshot {
+            presence: OperationalPresenceSnapshot {
+                observed_at: match gauge(O::PresenceObservedUnixSeconds) {
+                    0 => None,
+                    n => Timestamp::from_unix_millis((n as i64).saturating_mul(1000)).ok(),
+                },
+                connected: gauge(O::PresenceConnected),
+                grace_waiting: gauge(O::PresenceGraceWaiting),
+                reclaim_waiting: gauge(O::PresenceReclaimWaiting),
+                memberships: gauge(O::PresenceMemberships),
+                memberships_without_binding: gauge(O::MembershipsWithoutBinding),
+                bindings_without_membership: gauge(O::BindingsWithoutMembership),
+                joined_connections: gauge(O::JoinedConnections),
+                connection_ownership_mismatch: gauge(O::ConnectionOwnershipMismatch),
+            },
+            persistence: OperationalPersistenceSnapshot {
+                pending: gauge(O::PersistencePending),
+                oldest_pending_seconds: gauge(O::PersistenceOldestPendingSeconds),
+                entity_events: gauge(O::PersistenceEntityEvents),
+                command_outcomes: gauge(O::PersistenceCommandOutcomes),
+                generation_snapshots: gauge(O::PersistenceGenerationSnapshots),
+            },
+            resume_rejections: OperationalResumeRejections {
+                token_mismatch: resume(ResumeRejectReason::TokenMismatch),
+                history_unavailable: resume(ResumeRejectReason::HistoryUnavailable),
+                revision_gap: resume(ResumeRejectReason::RevisionGap),
+                future_revision: resume(ResumeRejectReason::FutureRevision),
+                not_authorized: resume(ResumeRejectReason::NotAuthorized),
+                ownership_lost: resume(ResumeRejectReason::OwnershipLost),
+            },
             checkpoint_save_failures_total: self.checkpoint_save_failures_total.get(),
             checkpoint_restore_failures_total: self.checkpoint_restore_failures_total.get(),
             checkpoint_save_rejected_total: self.checkpoint_save_rejected_total.get(),
@@ -470,6 +545,11 @@ impl MetricsRecorder for PrometheusMetrics {
 
     fn add(&self, counter: Counter, n: u64) {
         match counter {
+            Counter::ResumeRejected { reason } => {
+                self.resume_rejected
+                    .get_or_create(&vec![("reason".to_owned(), reason.as_str().to_owned())])
+                    .inc_by(n);
+            }
             Counter::HttpRequests { method, status } => {
                 let labels = vec![
                     ("method".to_string(), method.as_str().to_string()),
@@ -556,6 +636,18 @@ impl MetricsRecorder for PrometheusMetrics {
 
     fn set(&self, gauge: Gauge, value: i64) {
         match gauge {
+            Gauge::Operational { kind } => {
+                if let Some(gauge) = self.operational.get(&kind) {
+                    // Several instance writers can finish out of order.
+                    if kind == OperationalGauge::LatestCheckpointUnixSeconds {
+                        gauge
+                            .inner()
+                            .fetch_max(value, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        gauge.set(value);
+                    }
+                }
+            }
             Gauge::InstanceCommandQueueDepth { queue } => {
                 let labels = vec![("queue".to_string(), queue.as_str().to_string())];
                 self.mailbox_depth.get_or_create(&labels).set(value);
@@ -759,6 +851,82 @@ mod tests {
         Counter, ExtensionDeliveryResult, Gauge, Histogram, HttpMethod, HttpStatusClass,
         MailboxQueue, MetricsExporter, MetricsRecorder, RateLimitScope, WebsocketDisconnectReason,
     };
+
+    #[test]
+    fn lifecycle_metrics_and_resume_rejections_are_bounded_and_readable() {
+        use orbisync_application::metrics::{OperationalGauge as O, ResumeRejectReason as R};
+        let metrics = PrometheusMetrics::new();
+        metrics.set(
+            Gauge::Operational {
+                kind: O::PresenceConnected,
+            },
+            3,
+        );
+        metrics.set(
+            Gauge::Operational {
+                kind: O::PresenceGraceWaiting,
+            },
+            2,
+        );
+        metrics.set(
+            Gauge::Operational {
+                kind: O::PresenceObservedUnixSeconds,
+            },
+            1_800_000_000,
+        );
+        metrics.set(
+            Gauge::Operational {
+                kind: O::PersistencePending,
+            },
+            4,
+        );
+        metrics.set(
+            Gauge::Operational {
+                kind: O::PersistenceOldestPendingSeconds,
+            },
+            120,
+        );
+        metrics.set(
+            Gauge::Operational {
+                kind: O::LatestCheckpointUnixSeconds,
+            },
+            100,
+        );
+        metrics.set(
+            Gauge::Operational {
+                kind: O::LatestCheckpointUnixSeconds,
+            },
+            90,
+        );
+        metrics.add(
+            Counter::ResumeRejected {
+                reason: R::RevisionGap,
+            },
+            5,
+        );
+        let snapshot = metrics.operational_snapshot();
+        assert_eq!(
+            (snapshot.presence.connected, snapshot.presence.grace_waiting),
+            (3, 2)
+        );
+        assert!(snapshot.presence.observed_at.is_some());
+        assert_eq!(
+            (
+                snapshot.persistence.pending,
+                snapshot.persistence.oldest_pending_seconds
+            ),
+            (4, 120)
+        );
+        assert_eq!(snapshot.resume_rejections.revision_gap, 5);
+        let text = metrics.render();
+        assert!(text.contains("resume_rejections_total{reason=\"revision_gap\"} 5"));
+        assert!(text.contains("checkpoint_latest_timestamp_seconds 100"));
+        for kind in O::ALL {
+            assert!(text.contains(kind.as_str()));
+        }
+        assert!(!text.contains("presence_id="));
+        assert!(!text.contains("token="));
+    }
 
     #[test]
     fn operational_snapshot_reads_typed_counters_and_gauges() {

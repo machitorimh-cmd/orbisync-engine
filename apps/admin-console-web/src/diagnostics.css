@@ -1,0 +1,12 @@
+.diagnostic-settings { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+.diagnostic-settings label { display: grid; gap: .35rem; font-size: .85rem; }
+.diagnostic-settings input { max-width: 10rem; }
+.diagnostic-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 1rem; }
+.diagnostic-grid section { padding: 1rem; border: 1px solid var(--border); border-radius: .6rem; background: var(--surface-soft); }
+.diagnostic-grid h3 { margin-top: 0; }
+.diagnostic-grid dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(4rem, .9fr); gap: .6rem; margin-bottom: 0; }
+.diagnostic-grid dt { color: var(--muted); }
+.diagnostic-grid dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.diagnostic-warnings { border-left: 3px solid var(--amber); padding: 1rem 1rem 1rem 2rem; background: rgb(247 201 107 / .07); }
+.diagnostic-healthy { border-left: 3px solid var(--green); padding: 1rem 1rem 1rem 2rem; }
+.diagnostic-content > p { color: var(--muted); font-size: .85rem; line-height: 1.7; }

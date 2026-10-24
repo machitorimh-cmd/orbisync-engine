@@ -56,6 +56,30 @@ it("installs sync routing before send, including synchronous JoinAccepted and Sn
     assert.equal(errors, 1);
   } finally { await conn.disconnect(); }
 });
+it("a normal remote close ends ready state, settles tracked commands unknown and rejects new sends", async () => {
+  const socket = new Socket(), conn = connection(socket);
+  try {
+    const instance = await conn.join("room");
+    await instance.ready();
+    const tracked = instance.commands.submit({ entityId: "a", operation: "delete" });
+    let statusWhenOffline: string | undefined;
+    conn.onConnectionStateChange(state => { if (state.phase === "offline") statusWhenOffline = instance.syncStatus; });
+    socket.readyState = 3;
+    for (const listener of [...socket.listeners.get("close") ?? []]) listener({ code: 1000, reason: "maintenance" } as unknown as Event);
+    assert.equal(instance.syncStatus, "failed");
+    assert.equal(statusWhenOffline, "failed", "offline observers must never see the old ready state");
+    assert.equal(conn.getConnectionState().phase, "offline");
+    assert.equal((await tracked.result).status, "unknown");
+    assert.equal(tracked.state.result?.status, "unknown");
+    assert.equal(instance.commands.get(tracked.request.commandId), tracked);
+    assert.throws(() => instance.commands.submit({ entityId: "b", operation: "delete" }), { code: "NOT_READY" });
+    assert.throws(() => tracked.retry(), { code: "NOT_READY" });
+    assert.throws(() => instance.sendEntityCommand({ entityId: "b", operation: "delete" }), { code: "NOT_READY" });
+    assert.equal(instance._getQueueLengths().reliable, 0);
+    assert.equal((conn as unknown as { reconnectTimer: unknown }).reconnectTimer, null, "normal close does not schedule implicit replay");
+    await assert.rejects(instance.ready(), { code: "DISCONNECTED" });
+  } finally { await conn.disconnect(); }
+});
 it("entityRevision reads unchanged acknowledgements without taking a state snapshot", async () => {
   const socket = new Socket();
   const conn = connection(socket);

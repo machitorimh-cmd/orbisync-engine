@@ -68,11 +68,46 @@ struct RetentionResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct PresenceResponse {
+    observed_at: Option<String>,
+    connected: u64,
+    grace_waiting: u64,
+    reclaim_waiting: u64,
+    memberships: u64,
+    memberships_without_binding: u64,
+    bindings_without_membership: u64,
+    joined_connections: u64,
+    connection_ownership_mismatch: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistenceResponse {
+    pending: u64,
+    oldest_pending_seconds: u64,
+    entity_events: u64,
+    command_outcomes: u64,
+    generation_snapshots: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeRejectionsResponse {
+    token_mismatch: u64,
+    history_unavailable: u64,
+    revision_gap: u64,
+    future_revision: u64,
+    not_authorized: u64,
+    ownership_lost: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct DiagnosticsResponse {
     collected_at: String,
     checkpoint: CheckpointResponse,
     queues: QueueResponse,
     active_connections: i64,
+    presence: PresenceResponse,
+    persistence: PersistenceResponse,
+    resume_rejections_total: ResumeRejectionsResponse,
     rate_limit_rejections_total: RateLimitResponse,
     extensions: ExtensionResponse,
     retention: RetentionResponse,
@@ -114,6 +149,32 @@ fn to_response(snapshot: orbisync_application::OperationalDiagnostics) -> Diagno
             },
         },
         active_connections: snapshot.active_connections,
+        presence: PresenceResponse {
+            observed_at: timestamp(snapshot.presence.observed_at),
+            connected: snapshot.presence.connected,
+            grace_waiting: snapshot.presence.grace_waiting,
+            reclaim_waiting: snapshot.presence.reclaim_waiting,
+            memberships: snapshot.presence.memberships,
+            memberships_without_binding: snapshot.presence.memberships_without_binding,
+            bindings_without_membership: snapshot.presence.bindings_without_membership,
+            joined_connections: snapshot.presence.joined_connections,
+            connection_ownership_mismatch: snapshot.presence.connection_ownership_mismatch,
+        },
+        persistence: PersistenceResponse {
+            pending: snapshot.persistence.pending,
+            oldest_pending_seconds: snapshot.persistence.oldest_pending_seconds,
+            entity_events: snapshot.persistence.entity_events,
+            command_outcomes: snapshot.persistence.command_outcomes,
+            generation_snapshots: snapshot.persistence.generation_snapshots,
+        },
+        resume_rejections_total: ResumeRejectionsResponse {
+            token_mismatch: snapshot.resume_rejections.token_mismatch,
+            history_unavailable: snapshot.resume_rejections.history_unavailable,
+            revision_gap: snapshot.resume_rejections.revision_gap,
+            future_revision: snapshot.resume_rejections.future_revision,
+            not_authorized: snapshot.resume_rejections.not_authorized,
+            ownership_lost: snapshot.resume_rejections.ownership_lost,
+        },
         rate_limit_rejections_total: RateLimitResponse {
             connection: snapshot.rate_limit_rejections.connection,
             user: snapshot.rate_limit_rejections.user,
@@ -220,6 +281,28 @@ mod tests {
                 outbound_per_connection: 256,
             },
             active_connections: 11,
+            presence: orbisync_application::diagnostics::OperationalPresenceSnapshot {
+                observed_at: Some(at),
+                connected: 2,
+                grace_waiting: 3,
+                reclaim_waiting: 4,
+                memberships: 10,
+                memberships_without_binding: 1,
+                bindings_without_membership: 0,
+                joined_connections: 2,
+                connection_ownership_mismatch: 0,
+            },
+            persistence: orbisync_application::diagnostics::OperationalPersistenceSnapshot {
+                pending: 3,
+                oldest_pending_seconds: 120,
+                entity_events: 1,
+                command_outcomes: 1,
+                generation_snapshots: 1,
+            },
+            resume_rejections: orbisync_application::diagnostics::OperationalResumeRejections {
+                revision_gap: 5,
+                ..Default::default()
+            },
             rate_limit_rejections: OperationalRateLimitSnapshot {
                 connection: 12,
                 user: 13,
@@ -254,6 +337,11 @@ mod tests {
         let response = to_response(snapshot(at));
         let value = serde_json::to_value(response).expect("serialize");
         assert_eq!(value["active_connections"], 11);
+        assert_eq!(value["presence"]["grace_waiting"], 3);
+        assert_eq!(value["presence"]["memberships_without_binding"], 1);
+        assert_eq!(value["persistence"]["pending"], 3);
+        assert_eq!(value["persistence"]["oldest_pending_seconds"], 120);
+        assert_eq!(value["resume_rejections_total"]["revision_gap"], 5);
         assert_eq!(value["extensions"]["dead_letters"], 19);
         assert_eq!(
             value["retention"]["idempotency_records_last_success_at"],

@@ -109,6 +109,11 @@ fn worker_services(
     metrics: Arc<dyn MetricsRecorder>,
 ) -> super::runtime_maintenance::MaintenanceServices {
     super::runtime_maintenance::MaintenanceServices {
+        pending_persistence: Arc::new(
+            orbisync_server::operational_runtime::PersistenceBacklog::new(Arc::new(
+                orbisync_domain::SystemClock::new(),
+            )),
+        ),
         registry,
         entities,
         extensions,

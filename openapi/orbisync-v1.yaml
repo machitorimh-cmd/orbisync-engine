@@ -6,7 +6,7 @@ info:
     the source of truth for what the server actually serves and is machine-checked
     against the real Axum router (scripts/validate_openapi_routes.py). Design work
     for not-yet-wired operations is preserved in openapi/orbisync-v1-planned.yaml
-    and is not routable. The file declares 32 paths / 41 operations, including
+    and is not routable. The file declares the implemented operations below, including
     the ADR-007 extension command endpoint, after
     rest-users-auth wired GET /v1/auth/me, PATCH /v1/users/{user_id},
     POST /v1/users/{user_id}/disable, POST /v1/users/{user_id}/enable,
@@ -765,6 +765,51 @@ paths:
       parameters:
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
+      - name: from
+        in: query
+        description: Inclusive lower occurrence time; must not exceed to.
+        schema:
+          type: string
+          format: date-time
+      - name: to
+        in: query
+        description: Inclusive upper occurrence time.
+        schema:
+          type: string
+          format: date-time
+      - name: actor_id
+        in: query
+        description: Exact acting user.
+        schema:
+          $ref: '#/components/schemas/UuidV7'
+      - name: action
+        in: query
+        description: Exact action; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: resource_type
+        in: query
+        description: Exact resource_type; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: resource_id
+        in: query
+        description: Exact resource_id; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: request_id
+        in: query
+        description: Exact request_id; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
       responses:
         '200':
           description: Audit event page
@@ -774,6 +819,7 @@ paths:
                 $ref: '#/components/schemas/AuditEventPage'
         default:
           $ref: '#/components/responses/Error'
+      description: Requires admin.audit.read. Compound exact filters with bounded, microsecond keyset pagination. Metadata redaction matches page exports.
   /v1/audit-events/{event_id}:
     get:
       operationId: getAuditEvent
@@ -802,6 +848,219 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/OperationalDiagnostics'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/sessions:
+    get:
+      operationId: listOwnSessions
+      description: Lists only the authenticated user's sessions, with current-session identification and no token material. Every page read is audited.
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Secret-free session page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedSessionPage'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/sessions/revoke-others:
+    post:
+      operationId: revokeOtherSessions
+      description: Revokes every other active session of the authenticated user. Current session is retained; refresh tokens and realtime tickets are revoked atomically and existing sockets are closed on inbound, outbound or heartbeat validation.
+      responses:
+        '200':
+          description: Number of revoked sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokedSessionCount'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/sessions/{session_id}:
+    delete:
+      operationId: revokeOwnSession
+      description: Idempotently revokes an owned session and its refresh tokens/tickets. A foreign or missing session returns 404.
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UuidV7'
+      responses:
+        '204':
+          description: Session revoked
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: labelOwnSession
+      description: Updates only an owned session's advisory display name; labels are excluded from audit metadata.
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UuidV7'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - device_label
+              properties:
+                device_label:
+                  type:
+                  - string
+                  - 'null'
+                  minLength: 1
+                  maxLength: 128
+                  description: Advisory device name, never an authorization factor. Nonblank and no control characters; null clears it.
+      responses:
+        '204':
+          description: Label updated
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/{user_id}/sessions:
+    get:
+      operationId: listUserSessions
+      description: Requires admin.sessions.read. Listing another user's inventory does not grant revocation permission.
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Secret-free session page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedSessionPage'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: revokeAllUserSessions
+      description: Requires admin.sessions.revoke. Revokes all currently active sessions in one audited transaction. This does not ban future valid logins.
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Number of revoked sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokedSessionCount'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/users/{user_id}/sessions/{session_id}:
+    delete:
+      operationId: revokeUserSession
+      description: Requires admin.sessions.revoke. A session belonging to a different target user is 404.
+      parameters:
+      - $ref: '#/components/parameters/UserId'
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/UuidV7'
+      responses:
+        '204':
+          description: Session revoked
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/auth/external/keys/reload:
+    post:
+      operationId: reloadExternalVerificationKeys
+      description: Requires admin.auth.keys.reload. Reads only the configured local JWKS (maximum 256 KiB, 64 keys). Validates the entire candidate, persists audit evidence and atomically replaces the live set. Invalid files or unavailable audit storage retain the current set. Include old and new kids in the file for overlap; removing a kid rejects subsequent external authentications, while existing OrbiSync sessions follow their own expiry/revocation. Issuer, audience and algorithm cannot be changed by this request. Returns AUTH_METHOD_DISABLED when unavailable.
+      responses:
+        '200':
+          description: Published process-local generation and public key identifiers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExternalKeyReloadSummary'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/audit-events/export:
+    get:
+      operationId: exportAuditEventPage
+      description: Requires admin.audit.read. Exports at most one page (maximum 200 rows); never loops through all records. Metadata is recursively redacted, including source IP and authentication secrets. CSV cells neutralize formula injection. Cursors bind every filter at full timestamp precision; audit ordering retains PostgreSQL microseconds. Old audit cursor versions are invalidated on upgrade.
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - name: from
+        in: query
+        description: Inclusive lower occurrence time; must not exceed to.
+        schema:
+          type: string
+          format: date-time
+      - name: to
+        in: query
+        description: Inclusive upper occurrence time.
+        schema:
+          type: string
+          format: date-time
+      - name: actor_id
+        in: query
+        description: Exact acting user.
+        schema:
+          $ref: '#/components/schemas/UuidV7'
+      - name: action
+        in: query
+        description: Exact action; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: resource_type
+        in: query
+        description: Exact resource_type; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: resource_id
+        in: query
+        description: Exact resource_id; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: request_id
+        in: query
+        description: Exact request_id; all filters are bound into the continuation cursor.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+      - name: format
+        in: query
+        description: Output format.
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          default: json
+      responses:
+        '200':
+          description: One audit page. CSV continuation is in X-Next-Cursor; JSON also includes next_cursor.
+          headers:
+            X-Next-Cursor:
+              description: Opaque continuation for exactly the same filters.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventPage'
+            text/csv:
+              schema:
+                type: string
         default:
           $ref: '#/components/responses/Error'
 components:
@@ -879,6 +1138,93 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
   schemas:
+    ManagedSession:
+      type: object
+      additionalProperties: false
+      required:
+      - session_id
+      - created_at
+      - expires_at
+      - revoked_at
+      - status
+      - current
+      - device_label
+      properties:
+        session_id:
+          $ref: '#/components/schemas/UuidV7'
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        status:
+          type: string
+          enum:
+          - active
+          - expired
+          - revoked
+        current:
+          type: boolean
+        device_label:
+          type:
+          - string
+          - 'null'
+          minLength: 1
+          maxLength: 128
+          description: Advisory device name, never an authorization factor. Nonblank and no control characters; null clears it.
+    ManagedSessionPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/ManagedSession'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    RevokedSessionCount:
+      type: object
+      additionalProperties: false
+      required:
+      - revoked_count
+      properties:
+        revoked_count:
+          type: integer
+          minimum: 0
+    ExternalKeyReloadSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - generation
+      - key_count
+      - key_ids
+      properties:
+        generation:
+          type: integer
+          minimum: 1
+        key_count:
+          type: integer
+          minimum: 1
+          maximum: 64
+        key_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
     UuidV7:
       type: string
       format: uuid
@@ -1564,6 +1910,9 @@ components:
       - rate_limit_rejections_total
       - extensions
       - retention
+      - presence
+      - persistence
+      - resume_rejections_total
       properties:
         collected_at:
           type: string
@@ -1618,21 +1967,45 @@ components:
         rate_limit_rejections_total:
           type: object
           additionalProperties: false
-          required: [connection, user, ip, password_hash, instance]
+          required:
+          - connection
+          - user
+          - ip
+          - password_hash
+          - instance
           properties:
-            connection: {type: integer, minimum: 0}
-            user: {type: integer, minimum: 0}
-            ip: {type: integer, minimum: 0}
-            password_hash: {type: integer, minimum: 0}
-            instance: {type: integer, minimum: 0}
+            connection:
+              type: integer
+              minimum: 0
+            user:
+              type: integer
+              minimum: 0
+            ip:
+              type: integer
+              minimum: 0
+            password_hash:
+              type: integer
+              minimum: 0
+            instance:
+              type: integer
+              minimum: 0
         extensions:
           type: object
           additionalProperties: false
-          required: [outbox_pending, deliveries_in_flight, dead_letters]
+          required:
+          - outbox_pending
+          - deliveries_in_flight
+          - dead_letters
           properties:
-            outbox_pending: {type: integer, minimum: 0}
-            deliveries_in_flight: {type: integer, minimum: 0}
-            dead_letters: {type: integer, minimum: 0}
+            outbox_pending:
+              type: integer
+              minimum: 0
+            deliveries_in_flight:
+              type: integer
+              minimum: 0
+            dead_letters:
+              type: integer
+              minimum: 0
         retention:
           type: object
           additionalProperties: false
@@ -1643,17 +2016,122 @@ components:
           - extension_outbox_last_success_at
           properties:
             realtime_tickets_last_success_at:
-              type: [string, 'null']
+              type:
+              - string
+              - 'null'
               format: date-time
             idempotency_records_last_success_at:
-              type: [string, 'null']
+              type:
+              - string
+              - 'null'
               format: date-time
             audit_source_ips_last_success_at:
-              type: [string, 'null']
+              type:
+              - string
+              - 'null'
               format: date-time
             extension_outbox_last_success_at:
-              type: [string, 'null']
+              type:
+              - string
+              - 'null'
               format: date-time
+        presence:
+          type: object
+          additionalProperties: false
+          required:
+          - observed_at
+          - connected
+          - grace_waiting
+          - reclaim_waiting
+          - memberships
+          - memberships_without_binding
+          - bindings_without_membership
+          - joined_connections
+          - connection_ownership_mismatch
+          properties:
+            connected:
+              type: integer
+              minimum: 0
+            grace_waiting:
+              type: integer
+              minimum: 0
+            reclaim_waiting:
+              type: integer
+              minimum: 0
+            memberships:
+              type: integer
+              minimum: 0
+            memberships_without_binding:
+              type: integer
+              minimum: 0
+            bindings_without_membership:
+              type: integer
+              minimum: 0
+            joined_connections:
+              type: integer
+              minimum: 0
+            connection_ownership_mismatch:
+              type: integer
+              minimum: 0
+            observed_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+        persistence:
+          type: object
+          additionalProperties: false
+          required:
+          - pending
+          - oldest_pending_seconds
+          - entity_events
+          - command_outcomes
+          - generation_snapshots
+          properties:
+            pending:
+              type: integer
+              minimum: 0
+            oldest_pending_seconds:
+              type: integer
+              minimum: 0
+            entity_events:
+              type: integer
+              minimum: 0
+            command_outcomes:
+              type: integer
+              minimum: 0
+            generation_snapshots:
+              type: integer
+              minimum: 0
+        resume_rejections_total:
+          type: object
+          additionalProperties: false
+          required:
+          - token_mismatch
+          - history_unavailable
+          - revision_gap
+          - future_revision
+          - not_authorized
+          - ownership_lost
+          properties:
+            token_mismatch:
+              type: integer
+              minimum: 0
+            history_unavailable:
+              type: integer
+              minimum: 0
+            revision_gap:
+              type: integer
+              minimum: 0
+            future_revision:
+              type: integer
+              minimum: 0
+            not_authorized:
+              type: integer
+              minimum: 0
+            ownership_lost:
+              type: integer
+              minimum: 0
     MailboxQueueDiagnostics:
       type: object
       additionalProperties: false

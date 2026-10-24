@@ -290,45 +290,45 @@ class ConfigUsageReaderDependencyTests(unittest.TestCase):
 
     def test_each_key_reader_is_necessary(self) -> None:
         keys = config_gate.parse_config_keys()
-        # Collect once on real root to get the expected readers
         real_files = config_gate.collect_production_files()
         self.assertGreater(len(keys), 0, "expected >0 config keys")
         self.assertGreater(len(real_files), 0, "expected >0 production files")
-        for key in keys:
-            readers = config_gate.find_readers_for_key(key, real_files, config_gate.ROOT)
-            self.assertGreater(
-                len(readers),
-                0,
-                f"key {key} should have at least one reader in real workspace",
-            )
-            leaf = config_gate.key_to_leaf(key)
-            # Mutate a temporary copy of the repository
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_root = Path(tmp)
-                # Copy the entire crates tree (82 files, cheap)
-                shutil.copytree(config_gate.ROOT / "crates", tmp_root / "crates")
-                # Mutate only the reader files for this key
-                for rel in readers:
-                    p = tmp_root / rel
-                    try:
-                        text = p.read_text(encoding="utf-8")
-                    except OSError:
-                        continue
-                    # Replace the leaf with a mutated name that will not match
-                    # the gate's pattern.  For the two hardened keys the pattern
-                    # is ".auth.<leaf>", but leaf is still part of it, so
-                    # replacing leaf is sufficient to break the match.
-                    # This handles both ".leaf" and ".parent.leaf" cases.
-                    mutated = text.replace(leaf, leaf + "_MUTATED_FOR_TEST")
-                    p.write_text(mutated, encoding="utf-8")
-                tmp_files = config_gate.collect_production_files(tmp_root)
-                mutated_readers = config_gate.find_readers_for_key(key, tmp_files, tmp_root)
-                self.assertEqual(
-                    mutated_readers,
-                    [],
-                    f"key {key} should be dead after mutating its readers {readers}; "
-                    f"got {mutated_readers} — detection may be counting a phantom same-name field",
-                )
+        real_sources = config_gate._cleaned_sources(real_files)
+        # Keep every production file, but freeze one baseline instead of copying
+        # and lexing the unchanged crates tree for every key. Each mutation gets
+        # its own fresh source mapping; no cache survives this test invocation.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            shutil.copytree(config_gate.ROOT / "crates", tmp_root / "crates")
+            tmp_files = config_gate.collect_production_files(tmp_root)
+            self.assertEqual({p.relative_to(config_gate.ROOT) for p in real_files},
+                             {p.relative_to(tmp_root) for p in tmp_files})
+            originals = {path: path.read_text(encoding="utf-8") for path in tmp_files}
+            baseline = config_gate._cleaned_sources(tmp_files)
+            for key in keys:
+                readers = config_gate.find_readers_for_key(
+                    key, real_files, config_gate.ROOT, cleaned_sources=real_sources)
+                self.assertGreater(len(readers), 0,
+                                   f"key {key} should have at least one reader in real workspace")
+                leaf = config_gate.key_to_leaf(key)
+                mutated_sources = dict(baseline)
+                changed = []
+                try:
+                    for relative in readers:
+                        path = tmp_root / relative
+                        mutated = originals[path].replace(leaf, leaf + "_MUTATED_FOR_TEST")
+                        path.write_text(mutated, encoding="utf-8")
+                        # Re-read the changed file into this mutation's snapshot.
+                        mutated_sources.update(config_gate._cleaned_sources([path]))
+                        changed.append(path)
+                    mutated_readers = config_gate.find_readers_for_key(
+                        key, tmp_files, tmp_root, cleaned_sources=mutated_sources)
+                    self.assertEqual(mutated_readers, [],
+                                     f"key {key} should be dead after mutating its readers {readers}; "
+                                     f"got {mutated_readers} — detection may be counting a phantom same-name field")
+                finally:
+                    for path in changed:
+                        path.write_text(originals[path], encoding="utf-8")
 
     def test_ttl_keys_require_auth_parent(self) -> None:
         # Regression for M5: ensure self.<leaf> in HttpState is not mistaken for config read
@@ -414,19 +414,39 @@ class RequiredEnvSupplyZeroScanTests(unittest.TestCase):
 
 
 class DenyExpiresZeroScanTests(unittest.TestCase):
-    def test_ignore_zero_via_main_fails(self) -> None:
-        # CR-15 / 21aa314 pattern: if no ignore entries were scanned, gate must fail
-        # rather than silently pass with 0 errors.
-        with mock.patch.object(deny_expires_gate, "collect_ignore_entries", return_value=[]):
+    NONEMPTY = '[advisories]\nignore = ["RUSTSEC-2026-1234"]\n# expires = 2999-01-01\n'
+
+    def run_gate(self, text: str) -> int:
+        with mock.patch.object(deny_expires_gate, "_read_deny_toml_text", return_value=text):
             with mock.patch.object(sys, "argv", ["check_deny_expires.py"]):
-                ret = deny_expires_gate.main()
-            self.assertNotEqual(ret, 0, "ignore zero should make deny expires gate fail")
+                return deny_expires_gate.main()
+
+    def test_ignore_zero_via_main_fails(self) -> None:
+        # A populated TOML array must not silently become a zero-entry scan.
+        with mock.patch.object(deny_expires_gate, "collect_ignore_entries", return_value=[]):
+            self.assertEqual(self.run_gate(self.NONEMPTY), 1)
 
     def test_ignore_zero_direct_message(self) -> None:
         with mock.patch.object(deny_expires_gate, "collect_ignore_entries", return_value=[]):
-            with mock.patch.object(sys, "argv", ["check_deny_expires.py"]):
-                ret = deny_expires_gate.main()
-                self.assertEqual(ret, 1)
+            self.assertNotEqual(self.run_gate(self.NONEMPTY), 0)
+
+    def test_explicit_empty_array_has_no_security_exemptions_and_passes(self) -> None:
+        self.assertEqual(self.run_gate('[advisories]\nignore = []\n'), 0)
+
+    def test_missing_or_malformed_ignore_configuration_fails(self) -> None:
+        for text in ('', '[advisories]\nyanked="deny"\n', '[advisories]\nignore=false\n',
+                     '[advisories]\nignore=[\n', '[advisories]\nignore=[false]\n',
+                     '[advisories]\nignore=["invalid"]\n', '[advisories]\nignore=[{reason="no id"}]\n'):
+            with self.subTest(text=text):
+                self.assertEqual(self.run_gate(text), 1)
+
+    def test_nonempty_ignore_still_requires_unexpired_comment(self) -> None:
+        self.assertEqual(self.run_gate(self.NONEMPTY), 0)
+        self.assertEqual(self.run_gate(self.NONEMPTY.replace('# expires = 2999-01-01', '')), 1)
+        self.assertEqual(self.run_gate(self.NONEMPTY.replace('2999-01-01', '2000-01-01')), 1)
+        # A comment in an unrelated following table cannot justify the ignore.
+        outside = self.NONEMPTY.replace('# expires = 2999-01-01', '[licenses]\n# expires = 2999-01-01')
+        self.assertEqual(self.run_gate(outside), 1)
 
     def test_normal_scan_passes(self) -> None:
         with mock.patch.object(sys, "argv", ["check_deny_expires.py"]):

@@ -1,3 +1,5 @@
+import type { DiagnosticsSnapshot } from "./diagnostics.js";
+
 export type User = {
   id: string;
   login_id: string;
@@ -49,6 +51,12 @@ export type AuditEvent = {
 export type Page<T> = {
   items: T[];
   next_cursor?: string | null;
+};
+
+export type AuditSearchFilters = Partial<Record<"from" | "to" | "actor_id" | "action" | "resource_type" | "resource_id" | "request_id", string>>;
+export type ManagedSession = {
+  session_id: string; created_at: string; expires_at: string; revoked_at: string | null;
+  status: "active" | "expired" | "revoked"; current: boolean; device_label: string | null;
 };
 
 export type Health = {
@@ -426,11 +434,52 @@ export class OrbiSyncAdminApi {
     );
   }
 
-  listAuditEvents(cursor?: string | null, action?: string): Promise<Page<AuditEvent>> {
+  listAuditEvents(cursor?: string | null, filters: AuditSearchFilters | string = {}): Promise<Page<AuditEvent>> {
     const params = new URLSearchParams({ limit: "100" });
     if (cursor) params.set("cursor", cursor);
-    if (action) params.set("action", action);
+    for (const [key, value] of Object.entries(typeof filters === "string" ? { action: filters } : filters)) {
+      if (value) params.set(key, value);
+    }
     return this.request<Page<AuditEvent>>(`/v1/audit-events?${params.toString()}`, { method: "GET" });
+  }
+
+  exportAuditEvents(format: "csv" | "json", cursor: string | null, filters: AuditSearchFilters): Promise<string | Page<AuditEvent>> {
+    const params = new URLSearchParams({ limit: "100", format });
+    if (cursor) params.set("cursor", cursor);
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+    return this.request(`/v1/audit-events/export?${params}`, { method: "GET" });
+  }
+
+  listSessions(cursor: string | null = null, userId?: string): Promise<Page<ManagedSession>> {
+    const path = userId ? `/v1/users/${encodeURIComponent(userId)}/sessions` : "/v1/auth/sessions";
+    return this.request(withPage(path, cursor), { method: "GET" });
+  }
+
+  revokeSession(sessionId: string, userId?: string): Promise<void> {
+    const path = userId ? `/v1/users/${encodeURIComponent(userId)}/sessions` : "/v1/auth/sessions";
+    return this.request(`${path}/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  }
+
+  revokeOtherSessions(): Promise<{ revoked_count: number }> {
+    return this.request("/v1/auth/sessions/revoke-others", { method: "POST" });
+  }
+
+  revokeUserSessions(userId: string): Promise<{ revoked_count: number }> {
+    return this.request(`/v1/users/${encodeURIComponent(userId)}/sessions`, { method: "DELETE" });
+  }
+
+  labelSession(sessionId: string, label: string | null): Promise<void> {
+    return this.request(`/v1/auth/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_label: label }),
+    });
+  }
+
+  reloadExternalKeys(): Promise<{ generation: number; key_count: number; key_ids: string[] }> {
+    return this.request("/v1/auth/external/keys/reload", { method: "POST" }, { allowRefresh: true });
+  }
+
+  getOperationalDiagnostics(): Promise<DiagnosticsSnapshot> {
+    return this.request("/v1/admin/diagnostics", { method: "GET" });
   }
 
   private async request<T>(

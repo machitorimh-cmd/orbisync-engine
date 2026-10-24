@@ -2,6 +2,7 @@ import {
   ApiError,
   OrbiSyncAdminApi,
   type AuditEvent,
+  type AuditSearchFilters,
   type Health,
   type InstanceMember,
   type ProbeResult,
@@ -12,6 +13,9 @@ import {
   type WorldInstance,
   normalizeServerUrl,
 } from "./api.js";
+import { mountSessionPanel } from "./sessions.js";
+import { mountDiagnostics } from "./diagnostics.js";
+import "./diagnostics.css";
 
 const DEFAULT_SERVER_URL = "http://127.0.0.1:8080";
 const SERVER_URL_STORAGE_KEY = "orbisync.admin.serverUrl";
@@ -36,6 +40,9 @@ function initialServerUrl(): string {
 const serverUrlEl = byId<HTMLInputElement>("serverUrl");
 serverUrlEl.value = initialServerUrl();
 const api = new OrbiSyncAdminApi(serverUrlEl.value);
+const sessionPanel = mountSessionPanel(api, byId<HTMLElement>("sessions"),
+  error => handleError(error, "セッション管理"), () => setAuthenticated(null));
+const diagnosticsPanel = mountDiagnostics(byId<HTMLElement>("diagnostics"), { load: () => api.getOperationalDiagnostics() });
 
 let signedInUser: User | null = null;
 let users: User[] = [];
@@ -48,6 +55,10 @@ let nextRolesCursor: string | null = null;
 let nextWorldsCursor: string | null = null;
 let nextInstancesCursor: string | null = null;
 let nextAuditCursor: string | null = null;
+let auditGeneration = 0;
+let auditLoading = false;
+let auditLoadedFilters: AuditSearchFilters | null = null;
+let auditExportCursor: string | null = null;
 let roleEditorUser: User | null = null;
 let userToEdit: User | null = null;
 let roleToEdit: Role | null = null;
@@ -110,6 +121,14 @@ function setAuthenticated(user: User | null): void {
 }
 
 function clearProtectedState(): void {
+  diagnosticsPanel.clear();
+  sessionPanel.reset();
+  auditGeneration++;
+  auditLoading = false;
+  auditLoadedFilters = null;
+  auditExportCursor = null;
+  byId<HTMLButtonElement>("exportAuditJsonBtn").disabled = true;
+  byId<HTMLButtonElement>("exportAuditCsvBtn").disabled = true;
   users = [];
   roles = [];
   worlds = [];
@@ -300,6 +319,7 @@ async function loadProtectedData(): Promise<void> {
     ["World一覧", loadWorlds(true)],
     ["Instance一覧", loadInstances(true)],
     ["監査ログ", loadAudit(true)],
+    ["運用診断", diagnosticsPanel.refresh()],
   ];
   const results = await Promise.allSettled(tasks.map(([, task]) => task));
   results.forEach((result, index) => {
@@ -634,11 +654,33 @@ function renderMembers(members: InstanceMember[]): void {
 }
 
 async function loadAudit(reset: boolean): Promise<void> {
-  const action = byId<HTMLInputElement>("auditActionFilter").value.trim();
-  const page = await api.listAuditEvents(reset ? null : nextAuditCursor, action || undefined);
-  auditEvents = reset ? page.items : mergeAudit(auditEvents, page.items);
-  nextAuditCursor = page.next_cursor ?? null;
-  renderAudit();
+  const filters = readAuditFilters();
+  if (JSON.stringify(filters) !== JSON.stringify(auditLoadedFilters)) reset = true;
+  if (auditLoading && !reset) return;
+  const generation = ++auditGeneration;
+  const cursor = reset ? null : nextAuditCursor;
+  auditLoading = true;
+  try {
+    const page = await api.listAuditEvents(cursor, filters);
+    if (generation !== auditGeneration) return;
+    auditEvents = reset ? page.items : mergeAudit(auditEvents, page.items);
+    nextAuditCursor = page.next_cursor ?? null;
+    auditLoadedFilters = filters;
+    auditExportCursor = cursor;
+    byId<HTMLButtonElement>("exportAuditJsonBtn").disabled = false;
+    byId<HTMLButtonElement>("exportAuditCsvBtn").disabled = false;
+    renderAudit();
+  } finally { if (generation === auditGeneration) auditLoading = false; }
+}
+
+function readAuditFilters(): AuditSearchFilters {
+  const fields = { action: "auditActionFilter", actor_id: "auditActorFilter", resource_type: "auditResourceTypeFilter", resource_id: "auditResourceIdFilter", request_id: "auditRequestFilter", from: "auditFromFilter", to: "auditToFilter" } as const;
+  const filters: AuditSearchFilters = {};
+  for (const [key, id] of Object.entries(fields)) {
+    const value = byId<HTMLInputElement>(id).value.trim();
+    if (value) filters[key as keyof AuditSearchFilters] = key === "from" || key === "to" ? new Date(value).toISOString() : value;
+  }
+  return filters;
 }
 
 function mergeAudit(current: AuditEvent[], incoming: AuditEvent[]): AuditEvent[] {
@@ -911,6 +953,40 @@ for (const [id, loader, label] of nextBindings) {
 byId<HTMLButtonElement>("applyAuditFilterBtn").addEventListener("click", (event) => {
   const button = event.currentTarget as HTMLButtonElement;
   void withBusy(button, () => loadAudit(true)).catch((error) => handleError(error, "監査ログ絞り込み"));
+});
+for (const id of ["auditActionFilter", "auditActorFilter", "auditResourceTypeFilter", "auditResourceIdFilter", "auditRequestFilter", "auditFromFilter", "auditToFilter"]) {
+  byId<HTMLInputElement>(id).addEventListener("input", () => {
+    auditGeneration++; auditLoading = false; auditLoadedFilters = null;
+    auditExportCursor = null; nextAuditCursor = null; auditEvents = []; renderAudit();
+    byId<HTMLButtonElement>("exportAuditJsonBtn").disabled = true;
+    byId<HTMLButtonElement>("exportAuditCsvBtn").disabled = true;
+  });
+}
+for (const format of ["json", "csv"] as const) {
+  const button = byId<HTMLButtonElement>(format === "json" ? "exportAuditJsonBtn" : "exportAuditCsvBtn");
+  button.addEventListener("click", () => {
+    void withBusy(button, async () => {
+      if (!auditLoadedFilters) return;
+      const generation = auditGeneration;
+      const content = await api.exportAuditEvents(format, auditExportCursor, { ...auditLoadedFilters });
+      if (generation !== auditGeneration) return;
+      const blob = new Blob([typeof content === "string" ? content : JSON.stringify(content, null, 2)], {
+        type: format === "csv" ? "text/csv;charset=utf-8" : "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob), link = document.createElement("a");
+      link.href = url; link.download = `audit-events.${format}`; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    }).catch(error => handleError(error, "監査ログ出力"))
+      .finally(() => { button.disabled = auditLoadedFilters === null; });
+  });
+}
+byId<HTMLButtonElement>("reloadExternalKeysBtn").addEventListener("click", event => {
+  const button = event.currentTarget as HTMLButtonElement;
+  void withBusy(button, async () => {
+    const result = await api.reloadExternalKeys();
+    byId<HTMLElement>("externalKeysStatus").textContent = `鍵世代 ${result.generation}、${result.key_count}件: ${result.key_ids.join(", ")}`;
+    activity("success", "外部認証の署名鍵を更新しました");
+  }).catch(error => handleError(error, "外部署名鍵の再読み込み"));
 });
 byId<HTMLButtonElement>("clearLogBtn").addEventListener("click", () => byId<HTMLOListElement>("activityLog").replaceChildren());
 

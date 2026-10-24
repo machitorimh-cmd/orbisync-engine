@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use orbisync_application::metrics::{Counter, MetricsRecorder};
+use orbisync_application::metrics::{Counter, Gauge, MetricsRecorder, OperationalGauge};
 use orbisync_application::{
     AppCheckpoint, ApplicationError, CheckpointSaveReceipt, CheckpointStore,
     OperationalDiagnostics, OperationalDiagnosticsPort, OperationalQueueLimits,
@@ -36,9 +36,17 @@ impl CheckpointStore for MeteredCheckpointStore {
         &self,
         checkpoint: AppCheckpoint,
     ) -> Result<Vec<CheckpointSaveReceipt>, ApplicationError> {
+        let created_at = checkpoint.created_at.to_unix_millis().unwrap_or(0) / 1000;
         let result = self.inner.save_checkpoint(checkpoint).await;
         if result.is_err() {
             self.metrics.incr(Counter::CheckpointSaveFailuresTotal);
+        } else {
+            self.metrics.set(
+                Gauge::Operational {
+                    kind: OperationalGauge::LatestCheckpointUnixSeconds,
+                },
+                created_at,
+            );
         }
         result
     }
@@ -94,20 +102,48 @@ impl OperationalDiagnosticsPort for RuntimeOperationalDiagnostics {
         let dead_letters =
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM extension_dead_letters")
                 .fetch_one(&self.pool);
-        let (latest_checkpoint, dead_letters) = tokio::try_join!(latest_checkpoint, dead_letters)
-            .map_err(|error| {
-            tracing::warn!(
-                event = "operational_diagnostics.database_failed",
-                error = %error,
-                "failed to collect protected operational diagnostics"
-            );
-            ApplicationError::port_failure("operational diagnostics database query failed")
-        })?;
+        let latest_generation = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT max(g.completed_millis) FROM checkpoint_heads h JOIN checkpoint_generations g USING(instance_id,generation_id)",
+        ).fetch_one(&self.pool);
+        let (latest_checkpoint, dead_letters, latest_generation) =
+            tokio::try_join!(latest_checkpoint, dead_letters, latest_generation).map_err(
+                |error| {
+                    tracing::warn!(
+                        event = "operational_diagnostics.database_failed",
+                        error = %error,
+                        "failed to collect protected operational diagnostics"
+                    );
+                    ApplicationError::port_failure("operational diagnostics database query failed")
+                },
+            )?;
 
+        let latest_checkpoint = latest_checkpoint
+            .map(Timestamp::from_offset_date_time)
+            .into_iter()
+            .chain(latest_generation.and_then(|millis| Timestamp::from_unix_millis(millis).ok()))
+            .max_by_key(|value| value.to_unix_millis().unwrap_or(0));
+        self.metrics.set(
+            Gauge::Operational {
+                kind: OperationalGauge::LatestCheckpointUnixSeconds,
+            },
+            latest_checkpoint.map_or(0, |value| value.to_unix_millis().unwrap_or(0) / 1000),
+        );
+        self.metrics.set(
+            Gauge::Operational {
+                kind: OperationalGauge::ExtensionDeadLetters,
+            },
+            dead_letters,
+        );
+        self.metrics.set(
+            Gauge::Operational {
+                kind: OperationalGauge::DiagnosticsDatabaseObservedUnixSeconds,
+            },
+            self.clock.now().to_unix_millis().unwrap_or(0) / 1000,
+        );
         let metrics = self.metrics.operational_snapshot();
         Ok(OperationalDiagnostics {
             collected_at: self.clock.now(),
-            latest_checkpoint_at: latest_checkpoint.map(Timestamp::from_offset_date_time),
+            latest_checkpoint_at: latest_checkpoint,
             checkpoint_save_failures_total: metrics.checkpoint_save_failures_total,
             checkpoint_restore_failures_total: metrics.checkpoint_restore_failures_total,
             checkpoint_save_rejected_total: metrics.checkpoint_save_rejected_total,
@@ -123,6 +159,9 @@ impl OperationalDiagnosticsPort for RuntimeOperationalDiagnostics {
             },
             queue_limits: self.queue_limits,
             active_connections: metrics.active_connections,
+            presence: metrics.presence,
+            persistence: metrics.persistence,
+            resume_rejections: metrics.resume_rejections,
             rate_limit_rejections: OperationalRateLimitSnapshot {
                 connection: metrics.rate_limit_connection,
                 user: metrics.rate_limit_user,

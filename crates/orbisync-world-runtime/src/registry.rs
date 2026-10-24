@@ -68,6 +68,9 @@ pub struct InstanceEffects {
     pub events: Vec<ExtensionEvent>,
     /// Entity writes in their original order.
     pub persistence_events: Vec<EntityPersistenceEvent>,
+    /// Oldest enqueue instant, preserved through transfer and retry. No payload
+    /// or identifier is needed by the coordinator's age tracker.
+    pub persistence_oldest_at: Option<std::time::Instant>,
 }
 
 /// Work returned when an idle instance is reaped.
@@ -195,6 +198,7 @@ pub struct InstanceHandle {
     requests: mpsc::Sender<RuntimeTaskRequest>,
     interest_views: Arc<RwLock<Arc<crate::InterestSnapshot>>>,
     member_count: Arc<AtomicUsize>,
+    pending_persistence: Arc<Mutex<(u64, Option<std::time::Instant>)>>,
     /// Cached set of currently-present `PresenceId`s (ADR-025 "権限・所有・
     /// 参加状態のwindow"), refreshed on the same cadence as `interest_views`
     /// (after every `Submit`/`Tick`/`ReapIfIdle`) — a lock read, not an
@@ -399,6 +403,8 @@ impl InstanceHandle {
         let id = actor.descriptor().instance_id;
         let interest_views = Arc::new(RwLock::new(actor.interest_views()));
         let member_count = Arc::new(AtomicUsize::new(actor.member_count()));
+        let pending_persistence = Arc::new(Mutex::new(actor.pending_legacy_persistence()));
+        let task_pending_persistence = Arc::clone(&pending_persistence);
         let present_presences = Arc::new(RwLock::new(actor.present_presences()));
         let task_interest_views = Arc::clone(&interest_views);
         let task_member_count = Arc::clone(&member_count);
@@ -590,6 +596,7 @@ impl InstanceHandle {
                         // Cancellation of the receiver must not discard accepted writes.
                         // Restore the batch synchronously, before processing another command.
                         if let Err(effects) = reply.send(InstanceEffects {
+                            persistence_oldest_at: actor.pending_legacy_persistence().1,
                             events: actor.drain_outbox(),
                             persistence_events: actor.drain_persistence_batch(),
                         }) {
@@ -597,7 +604,12 @@ impl InstanceHandle {
                                 actor.outbox_mut().push(event);
                             }
                             for event in effects.persistence_events {
-                                actor.persistence_outbox_mut().push(event);
+                                actor.persistence_outbox_mut().push_at(
+                                    event,
+                                    effects
+                                        .persistence_oldest_at
+                                        .unwrap_or_else(std::time::Instant::now),
+                                );
                             }
                         }
                     }
@@ -634,6 +646,9 @@ impl InstanceHandle {
                         panic_for_chaos_test();
                     }
                 }
+                *task_pending_persistence
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = actor.pending_legacy_persistence();
             }
         });
         Self {
@@ -642,6 +657,7 @@ impl InstanceHandle {
             requests,
             interest_views,
             member_count,
+            pending_persistence,
             present_presences,
         }
     }
@@ -1321,6 +1337,38 @@ impl RuntimeRegistry {
             .map(InstanceActor::member_count)
             .sum::<usize>();
         task_members + legacy_members
+    }
+
+    /// Count and oldest age of accepted legacy effects still queued in actors.
+    /// Work already drained into storage workers is tracked by the coordinator.
+    #[must_use]
+    pub fn pending_persistence(&self) -> (u64, u64) {
+        let mut count = 0;
+        let mut age = 0;
+        let mut add = |(pending, since): (u64, Option<std::time::Instant>)| {
+            count += pending;
+            age = age.max(since.map_or(0, |start| start.elapsed().as_secs()));
+        };
+        for handle in self
+            .tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            add(*handle
+                .pending_persistence
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()));
+        }
+        for actor in self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            add(actor.pending_legacy_persistence());
+        }
+        (count, age)
     }
 
     /// Submits a command to the task owner, or to a legacy test actor outside

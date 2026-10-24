@@ -125,6 +125,16 @@ REST_OPERATIONS = {
     ("get", "/v1/audit-events"),
     ("get", "/v1/audit-events/{event_id}"),
     ("get", "/v1/admin/diagnostics"),
+    # F02 session management, F05 audit export and F06 local key rotation.
+    ("get", "/v1/auth/sessions"),
+    ("post", "/v1/auth/sessions/revoke-others"),
+    ("patch", "/v1/auth/sessions/{session_id}"),
+    ("delete", "/v1/auth/sessions/{session_id}"),
+    ("get", "/v1/users/{user_id}/sessions"),
+    ("delete", "/v1/users/{user_id}/sessions"),
+    ("delete", "/v1/users/{user_id}/sessions/{session_id}"),
+    ("get", "/v1/audit-events/export"),
+    ("post", "/v1/auth/external/keys/reload"),
 }
 PLANNED_PATH = ROOT / "openapi" / "orbisync-v1-planned.yaml"
 
@@ -781,11 +791,12 @@ def check_contracts(errors: list[str]) -> None:
         # W-29 moved 6 ops from planned to implemented (GET /v1/users etc), so planned 27->21, implemented 11->18.
         # ADR-026 added four authentication paths, each with one operation
         # (mode discovery plus guest, name-only and external), so 30->34 and 39->43.
-        if len(combined_paths) != 37:
-            errors.append(f"openapi: combined paths {len(combined_paths)} != 37 (original design lost)")
-        if len(combined_ops) != 46:
+        # F02/F05/F06 add seven unique paths and nine operations: 37/46 -> 44/55.
+        if len(combined_paths) != 44:
+            errors.append(f"openapi: combined paths {len(combined_paths)} != 44 (reviewed design plus session management, audit export and key rotation)")
+        if len(combined_ops) != 55:
             errors.append(
-                f"openapi: combined ops {len(combined_ops)} != 46 (original design plus ADR-026, admin, diagnostics and extension commands)"
+                f"openapi: combined ops {len(combined_ops)} != 55 (reviewed design plus session management, audit export and key rotation)"
             )
         # Invariant: any operation removed from planned must now be in implemented (distinguishes legitimate move vs design loss).
         # This prevents the constant-only check from misdiagnosing a deletion as an addition.

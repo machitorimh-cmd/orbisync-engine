@@ -289,8 +289,21 @@ def key_to_leaf(key: str) -> str:
     return key.split(".")[-1]
 
 
+def _cleaned_sources(files: list[Path]) -> dict[Path, str]:
+    """Read and lex once per scan; do not retain state across workspace edits."""
+    sources: dict[Path, str] = {}
+    for path in files:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        sources[path] = strip_rust_comments_and_strings(raw)
+    return sources
+
+
 def find_readers_for_key(
-    key: str, files: list[Path], root: Path = ROOT
+    key: str, files: list[Path], root: Path = ROOT,
+    *, cleaned_sources: dict[Path, str] | None = None,
 ) -> list[str]:
     """Return list of production files that contain a code reference to *key*.
 
@@ -327,14 +340,12 @@ def find_readers_for_key(
     else:
         leaf = parts[-1]
         pattern = re.compile(r"\.\s*" + re.escape(leaf) + r"\b")
+    if cleaned_sources is None:
+        cleaned_sources = _cleaned_sources(files)
     readers: list[str] = []
     for path in files:
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        cleaned = strip_rust_comments_and_strings(raw)
-        if pattern.search(cleaned):
+        cleaned = cleaned_sources.get(path)
+        if cleaned is not None and pattern.search(cleaned):
             readers.append(path.relative_to(root).as_posix())
     return readers
 
@@ -348,10 +359,11 @@ def check_config_usage(root: Path = ROOT) -> dict[str, list[str]]:
     """
     keys = parse_config_keys(root)
     files = collect_production_files(root)
+    cleaned_sources = _cleaned_sources(files)
     dead: dict[str, list[str]] = {}
     alive: dict[str, list[str]] = {}
     for key in keys:
-        readers = find_readers_for_key(key, files, root)
+        readers = find_readers_for_key(key, files, root, cleaned_sources=cleaned_sources)
         if readers:
             alive[key] = readers
         else:
@@ -364,10 +376,11 @@ def check_config_usage(root: Path = ROOT) -> dict[str, list[str]]:
 def check_all(root: Path = ROOT) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     keys = parse_config_keys(root)
     files = collect_production_files(root)
+    cleaned_sources = _cleaned_sources(files)
     dead: dict[str, list[str]] = {}
     alive: dict[str, list[str]] = {}
     for key in keys:
-        readers = find_readers_for_key(key, files, root)
+        readers = find_readers_for_key(key, files, root, cleaned_sources=cleaned_sources)
         if readers:
             alive[key] = readers
         else:

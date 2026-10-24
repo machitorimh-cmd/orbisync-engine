@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from scripts import check_config_usage as checker
@@ -45,6 +46,20 @@ class ConfigUsageRegressionTests(unittest.TestCase):
     def alive_keys(self) -> set[str]:
         _, alive = checker.check_all(self.root)
         return set(alive.keys())
+
+    def test_each_scan_lexes_each_file_once_and_next_scan_observes_edits(self) -> None:
+        path = _write_production_file(self.root, "orbisync-server", "lib.rs",
+                                      "fn f(c: &Config) { let _ = c.server.bind; }")
+        original = checker.strip_rust_comments_and_strings
+        with mock.patch.object(checker, "strip_rust_comments_and_strings", wraps=original) as lexer:
+            dead, alive = checker.check_all(self.root)
+            self.assertIn("server.bind", alive)
+            self.assertEqual(lexer.call_count, 1)
+            path.write_text("// c.server.bind\nfn f(c: &Config) { let _ = c.server.public_url; }", encoding="utf-8")
+            dead, alive = checker.check_all(self.root)
+            self.assertIn("server.bind", dead)
+            self.assertIn("server.public_url", alive)
+            self.assertEqual(lexer.call_count, 2, "edits must be re-read in the next scan")
 
     def test_dead_key_detected_when_no_reader(self) -> None:
         # No file references public_url or token_signing_key_env

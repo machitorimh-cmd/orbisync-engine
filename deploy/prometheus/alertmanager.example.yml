@@ -1,0 +1,17 @@
+# Deliberately silent until an operator supplies a real receiver. Choose a
+# destination per environment; never commit webhook credentials to this file.
+route:
+  receiver: unconfigured
+  group_by: [alertname, job, instance]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: unconfigured
+receivers:
+  - name: unconfigured
+    # Example (uncomment and inject your environment's URL):
+    # webhook_configs:
+    #   - url: https://your-alert-receiver.example.invalid/orbisync
+    #     send_resolved: true

@@ -1,0 +1,92 @@
+# Example defaults. Change numeric thresholds, `for` windows, severity and the
+# job selector for each environment; routing is in alertmanager.example.yml.
+groups:
+  - name: orbisync-operations
+    interval: 30s
+    rules:
+      - alert: OrbiSyncPresenceDiscrepancy
+        expr: >-
+          (presence_memberships_without_binding{job="orbisync"}
+          + presence_bindings_without_membership{job="orbisync"}
+          + presence_connection_ownership_mismatch{job="orbisync"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: realtime
+        annotations:
+          summary: Presence ownership and Membership disagree
+          description: Check lifecycle cleanup and Resume handoffs. Normal grace retention is excluded.
+      - alert: OrbiSyncPresenceReclaimStalled
+        expr: presence_reclaim_waiting{job="orbisync"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: realtime
+        annotations:
+          summary: Presence reclamation has not completed
+          description: Check control mailbox saturation and Leave acknowledgement. Grace waiting alone does not trigger this rule.
+      - alert: OrbiSyncPersistencePendingTooLong
+        expr: >-
+          (persistence_pending{job="orbisync"} > 0)
+          and on (job, instance) (persistence_oldest_pending_seconds{job="orbisync"} > 60)
+        for: 2m
+        labels:
+          severity: warning
+          component: persistence
+        annotations:
+          summary: Accepted persistence work is falling behind
+          description: Inspect pending stages and storage errors before restarting the process.
+      - alert: OrbiSyncCheckpointStalled
+        expr: >-
+          (persistence_pending{job="orbisync"} > 0)
+          and on (job, instance) (persistence_oldest_pending_seconds{job="orbisync"} > 600)
+          and on (job, instance) (time() - checkpoint_latest_timestamp_seconds{job="orbisync"} > 600)
+        for: 2m
+        labels:
+          severity: critical
+          component: persistence
+        annotations:
+          summary: Checkpoints are not advancing while persistence work remains
+          description: A process with no accepted pending work does not trigger this rule. Zero checkpoint timestamp means none has been observed.
+      - alert: OrbiSyncExtensionDeadLettersGrowing
+        expr: delta(extension_dead_letters{job="orbisync"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: extensions
+        annotations:
+          summary: Extension Dead Letter count is growing
+          description: Inspect endpoint health and delivery errors. This is a retained-row gauge, so concurrent purges can mask growth.
+      - alert: OrbiSyncQueuePressure
+        expr: >-
+          max by (job, instance) (
+          (instance_command_queue_depth{job="orbisync",queue="control"} > 51)
+          or (instance_command_queue_depth{job="orbisync",queue=~"entity|transform"} > 204)
+          or (outbound_queue_depth{job="orbisync"} > 204))
+        for: 3m
+        labels:
+          severity: warning
+          component: queues
+        annotations:
+          summary: A last-observed queue depth remains near capacity
+          description: Defaults assume control=64 and other queues=256. Adjust thresholds to configured capacities; samples are not global queue totals.
+      - alert: OrbiSyncDiagnosticsStale
+        expr: >-
+          (time() - presence_observed_timestamp_seconds{job="orbisync"} > 60)
+          or (time() - diagnostics_database_observed_timestamp_seconds{job="orbisync"} > 60)
+        for: 2m
+        labels:
+          severity: warning
+          component: diagnostics
+        annotations:
+          summary: Operational diagnostics samples are stale
+          description: Check the sampler, database latency and process health; stale zero counts do not establish health.
+      - alert: OrbiSyncUnavailable
+        expr: up{job="orbisync"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: service
+        annotations:
+          summary: OrbiSync metrics target is unavailable
+          description: Check the process and scrape network before interpreting the last diagnostic sample.

@@ -1,4 +1,26 @@
 #[test]
+fn operational_diagnostics_detect_orphan_membership_but_allow_normal_grace() {
+    let (actor, instance, _, user, presence) = snapshot_fixture();
+    let clock = Arc::new(orbisync_testkit::FixedClock::fixed());
+    let registry = Arc::new(RuntimeRegistry::new());
+    registry.insert(instance.id(), actor).unwrap();
+    let metrics = Arc::new(PrometheusMetrics::new());
+    let state = RealtimeState::builder(orbisync_config::Config::default().realtime,
+        registry, Arc::new(DeliveryRegistry::new()), clock.clone())
+        .with_metrics_recorder(metrics.clone()).build();
+    let backlog = crate::operational_runtime::PersistenceBacklog::new(clock);
+    state.refresh_operational_metrics(&backlog);
+    assert_eq!(metrics.operational_snapshot().presence.memberships_without_binding, 1);
+    state.resume_store.issue(user, instance.id(), presence, 0, orbisync_domain::Revision::INITIAL);
+    state.resume_store.mark_disconnected_epoch(presence, 0);
+    state.refresh_operational_metrics(&backlog);
+    let sample = metrics.operational_snapshot().presence;
+    assert_eq!((sample.connected, sample.grace_waiting, sample.reclaim_waiting), (0, 1, 0));
+    assert_eq!((sample.memberships_without_binding, sample.bindings_without_membership, sample.connection_ownership_mismatch), (0, 0, 0));
+    assert!(sample.observed_at.is_some());
+}
+
+#[test]
 fn review_active_token_prune_then_disconnect_reclaims_actual_membership() {
     let (actor, instance, _, user, presence) = snapshot_fixture();
     let clock = Arc::new(orbisync_testkit::FixedClock::new(
@@ -381,6 +403,51 @@ async fn review_custom_events_recheck_deadline_world_scope_and_session_on_existi
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn session_management_revocation_closes_idle_and_outbound_connections() {
+    for outbound in [false, true] {
+        let (actor, instance, world, user, presence) = snapshot_fixture();
+        let clock = Arc::new(orbisync_testkit::FixedClock::new(
+            orbisync_domain::Timestamp::from_unix_millis(1_000).unwrap(),
+        ));
+        let repository = Arc::new(orbisync_testkit::FakeIdentityRepository::new());
+        let mut session = orbisync_domain::AuthSession::new(
+            orbisync_domain::AuthSessionId::generate(), user, clock.now(),
+            orbisync_domain::Timestamp::from_unix_millis(100_000).unwrap(),
+        ).unwrap();
+        repository.save_session(&session).await.unwrap();
+        let registry = Arc::new(RuntimeRegistry::new());
+        registry.insert(instance.id(), actor).unwrap();
+        let state = Arc::new(RealtimeState::builder(
+            orbisync_config::Config::default().realtime, registry,
+            Arc::new(DeliveryRegistry::new()), clock.clone(),
+        ).with_identity_repository(repository.clone()).build());
+        state.resume_store.issue(user, instance.id(), presence, 0, orbisync_domain::Revision::INITIAL);
+        let (input, mut output, task) = review_runtime_connection(
+            state.clone(), world.id(), user, instance.id(), presence, Some(session.id()),
+        );
+        input.send(review_event(instance.id(), 3)).await.unwrap();
+        assert!(matches!(review_receive(&mut output).await.payload, Some(envelope::Payload::DomainEvent(_))));
+        session.revoke(clock.now());
+        repository.save_session(&session).await.unwrap();
+        if outbound {
+            let message = review_event(instance.id(), 4);
+            let Message::Binary(bytes) = message else { panic!("binary event"); };
+            state.delivery.broadcast(instance.id(), bytes.to_vec(), crate::delivery::Reliability::Reliable);
+        } else {
+            clock.advance_millis(20_001);
+            tokio::time::advance(std::time::Duration::from_secs(21)).await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.expect("revoked connection must close").unwrap();
+        while let Ok(message) = output.try_recv() {
+            if let Message::Binary(bytes) = message {
+                let env = decode_envelope(&bytes).unwrap();
+                assert!(!matches!(env.payload, Some(envelope::Payload::DomainEvent(_) | envelope::Payload::StateDelta(_))), "revoked idle recipient must not receive world data");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn review_superseded_socket_cannot_publish_or_disconnect_new_owner() {
     let (actor, instance, world, user, presence) = snapshot_fixture();
@@ -467,6 +534,35 @@ async fn review_receive_snapshot(output: &mut tokio::sync::mpsc::Receiver<Messag
 }
 
 #[tokio::test]
+async fn operational_resume_rejections_record_wire_failure_categories() {
+    for (token, mismatch) in [("", true), ("unknown-token", false)] {
+        let metrics = Arc::new(PrometheusMetrics::new());
+        let state = Arc::new(RealtimeState::builder(
+            orbisync_config::Config::default().realtime,
+            Arc::new(RuntimeRegistry::new()), Arc::new(DeliveryRegistry::new()),
+            Arc::new(orbisync_domain::SystemClock::new()),
+        ).with_tickets(Arc::new(ReviewUserVerifier(UserId::generate())))
+         .with_metrics_recorder(metrics.clone()).build());
+        let (socket, input, mut output) = RealtimeSocket::controlled();
+        let task = tokio::spawn(handle_socket(socket, state, Some(orbisync_protocol::WEBSOCKET_SUBPROTOCOL.into())));
+        input.send(admission88_hello()).await.unwrap();
+        assert!(matches!(review_receive(&mut output).await.payload, Some(envelope::Payload::ServerHello(_))));
+        input.send(Message::Binary(Envelope {
+            protocol_major: 1, sequence: 2,
+            payload: Some(envelope::Payload::ResumeSession(orbisync_protocol::v1::ResumeSession {
+                resume_token: token.to_owned(), ..Default::default()
+            })), ..Default::default()
+        }.encode_to_vec().into())).await.unwrap();
+        assert!(matches!(review_receive(&mut output).await.payload, Some(envelope::Payload::ResyncRequired(_))));
+        let rejected = metrics.operational_snapshot().resume_rejections;
+        assert_eq!(rejected.token_mismatch, u64::from(mismatch));
+        assert_eq!(rejected.history_unavailable, u64::from(!mismatch));
+        drop(input);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
 async fn review_resume_overlap_keeps_new_socket_active_after_old_transport_closes() {
     let (actor, instance, world, user, _) = snapshot_fixture();
     let id = instance.id();
@@ -475,6 +571,7 @@ async fn review_resume_overlap_keeps_new_socket_active_after_old_transport_close
     directory.insert_instance(instance);
     let registry = Arc::new(RuntimeRegistry::new());
     registry.insert(id, actor).unwrap();
+    let metrics = Arc::new(PrometheusMetrics::new());
     let state = Arc::new(
         RealtimeState::builder(
             orbisync_config::Config::default().realtime,
@@ -483,6 +580,7 @@ async fn review_resume_overlap_keeps_new_socket_active_after_old_transport_close
             Arc::new(orbisync_domain::SystemClock::new()),
         )
         .with_world_store(directory)
+        .with_metrics_recorder(metrics.clone())
         .with_tickets(Arc::new(ReviewUserVerifier(user)))
         .build(),
     );
@@ -561,6 +659,11 @@ async fn review_resume_overlap_keeps_new_socket_active_after_old_transport_close
         .unwrap()
         .unwrap();
     assert!(state.resume_store.is_current(presence, 1));
+    let backlog = crate::operational_runtime::PersistenceBacklog::new(state.clock.clone());
+    state.refresh_operational_metrics(&backlog);
+    let diagnostic = metrics.operational_snapshot().presence;
+    assert_eq!((diagnostic.connected, diagnostic.grace_waiting), (1, 0));
+    assert_eq!(diagnostic.connection_ownership_mismatch, 0);
     assert!(state.resume_store.evict_oldest_for_instance(id).is_none());
     new_input.send(review_event(id, 3)).await.unwrap();
     assert!(matches!(

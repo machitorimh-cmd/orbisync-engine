@@ -67,6 +67,12 @@ pub struct AuditFilter {
     pub actor_id: Option<UserId>,
     /// Optional exact action name.
     pub action: Option<String>,
+    /// Optional exact target resource type.
+    pub resource_type: Option<String>,
+    /// Optional exact target identifier.
+    pub resource_id: Option<String>,
+    /// Optional exact server-generated request correlation identifier.
+    pub request_id: Option<String>,
 }
 
 /// Secret-free audit projection matching `AuditEvent` schema.

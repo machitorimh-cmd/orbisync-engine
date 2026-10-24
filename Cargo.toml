@@ -32,6 +32,7 @@ orbisync-world-runtime = { path = "crates/orbisync-world-runtime" }
 
 async-trait = "0.1"
 argon2 = "0.5"
+aws-lc-rs = { version = "1.18.2", features = ["prebuilt-nasm"] }
 axum = "0.8"
 base64 = "0.22"
 futures-util = "0.3"
@@ -43,7 +44,7 @@ generic-array = "1.4"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 hmac = "0.12"
 ipnet = "2"
-jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 pollster = "0.4"
 proptest = "1"
 passwords = { version = "=3.1.18", default-features = false, features = ["common-password"] }

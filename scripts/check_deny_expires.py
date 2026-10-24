@@ -7,8 +7,9 @@ Rules (from CR-15 / 21aa314 pattern):
   RUSTSEC ignore expire, as cargo-deny itself does not enforce it.
 - If the expires date is in the past, the gate fails and names the advisory ID and date.
 - If an ignore entry has no expires comment, the gate fails.
-- Zero-scan guard: if no ignore entries were scanned (parser found 0), the gate fails
-  with a direct "no ... were scanned" message instead of silently passing.
+- An explicitly configured empty ignore array is valid: no advisories are exempt.
+- Missing/malformed TOML or ignore configuration fails closed. If configured entries
+  are lost by the scanner, the gate fails rather than treating them as empty.
 
 Usage:
     python scripts/check_deny_expires.py [--json]
@@ -21,6 +22,7 @@ import datetime
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,71 +51,40 @@ def _extract_advisories_section(text: str) -> str:
     return text[start:]
 
 
+def _configured_ignore_entries(text: str) -> list:
+    """Validate the actual TOML field, distinguishing explicit [] from no scan."""
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"deny.toml is invalid TOML: {error}") from error
+    advisories = document.get("advisories")
+    if not isinstance(advisories, dict):
+        raise ValueError("deny.toml: missing [advisories] table")
+    if "ignore" not in advisories or not isinstance(advisories["ignore"], list):
+        raise ValueError("deny.toml: [advisories].ignore must be an explicit array")
+    return advisories["ignore"]
+
+
 def collect_ignore_entries(text: str | None = None) -> list[str]:
-    """Return list of advisory IDs in [advisories].ignore."""
+    """Return validated IDs; explicit empty arrays are distinct from parse loss."""
     if text is None:
         text = _read_deny_toml_text()
-    section = _extract_advisories_section(text)
-    # Find ignore = [...] block (may span multiple lines)
-    # Use DOTALL to capture across lines
-    m = re.search(r"ignore\s*=\s*\[(.*?)\]", section, re.DOTALL)
-    if not m:
-        return []
-    inside = m.group(1)
     ids: list[str] = []
-    # String form: "RUSTSEC-...."
-    for sm in re.finditer(r'"([^"]+)"', inside):
-        val = sm.group(1).strip()
-        # Advisory IDs are uppercase with dash, e.g., RUSTSEC-2023-0071
-        # Filter to look like advisory IDs (contain dash and start with uppercase)
-        if re.match(r"^[A-Z]+-\d{4}-\d+", val):
-            ids.append(val)
+    for entry in _configured_ignore_entries(text):
+        if isinstance(entry, str):
+            advisory = entry
+        elif isinstance(entry, dict) and set(entry) <= {"id", "reason"}:
+            advisory = entry.get("id")
+            if "reason" in entry and not isinstance(entry["reason"], str):
+                raise ValueError("deny.toml: advisory ignore reason must be a string")
         else:
-            # For table form, the string might be value of id field, already captured via table regex below
-            # But we already capture those via table regex, so avoid duplicates
-            # Only add if not already from table? For now, if it looks like advisory ID, add.
-            # For string ignore, this is the advisory ID itself.
-            # For table ignore, the id field will also be captured as a string, so we might double count.
-            # To avoid double, we will later deduplicate via table parsing and handle correctly.
-            # Simpler: collect all strings that look like advisory IDs, then later collect table ids and deduplicate.
-            pass
-    # Table form: { id = "RUSTSEC-..." }
-    for tm in re.finditer(r"id\s*=\s*\"([^\"]+)\"", inside):
-        val = tm.group(1).strip()
-        if val not in ids:
-            ids.append(val)
-        # Also need to handle case where string form was not added due to above pass
-        # For string form, the id is directly the string value, not inside id =.
-        # So we need to separately handle string entries that are not inside tables.
-    # For string entries that are directly `"RUSTSEC-..."` not inside table, they were not added above
-    # because we skipped them. Let's re-parse string entries that are not part of `id =`
-    # Approach: find all standalone quoted strings in ignore block that are not preceded by `id =`
-    # Re-scan: find all `"X"` and check if preceding context is `id =`
-    # Simpler: if ids is empty and inside contains `"RUSTSEC`, assume those are string entries
-    if not ids:
-        for sm in re.finditer(r'"([^"]+)"', inside):
-            val = sm.group(1).strip()
-            if re.match(r"^[A-Z]+-\d{4}-\d+", val):
-                ids.append(val)
-    else:
-        # Deduplicate and also ensure string-only entries are included
-        # Check for string entries that were missed because ids already contains table ids
-        # Find all quoted strings that look like advisory IDs
-        all_quoted = [m.group(1).strip() for m in re.finditer(r'"([^"]+)"', inside) if re.match(r"^[A-Z]+-\d{4}-\d+", m.group(1).strip())]
-        for q in all_quoted:
-            if q not in ids:
-                # Check if this quoted string is not part of a table's id field that we already added?
-                # But if it's a string entry, it will be a standalone value like `"RUSTSEC-..."` with comma or newline
-                # We can add it if not already present
-                ids.append(q)
-    # Keep order and deduplicate
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for i in ids:
-        if i not in seen:
-            seen.add(i)
-            uniq.append(i)
-    return uniq
+            raise ValueError("deny.toml: advisory ignore must be an ID or an id/reason table")
+        if not isinstance(advisory, str) or not re.fullmatch(r"[A-Z]+-\d{4}-\d+", advisory):
+            raise ValueError("deny.toml: invalid advisory ID in ignore array")
+        if advisory in ids:
+            raise ValueError(f"deny.toml: duplicate advisory ignore {advisory}")
+        ids.append(advisory)
+    return ids
 
 
 def collect_expires_entries(text: str | None = None) -> list[tuple[str, datetime.date, int]]:
@@ -124,7 +95,7 @@ def collect_expires_entries(text: str | None = None) -> list[tuple[str, datetime
     # Also consider the header comments just before [advisories] that are part of advisory rationale
     # To be safe, look at whole file's advisories region including preceding comments
     # Find advisories section with leading comments: capture 20 lines before [advisories]
-    full_text = _read_deny_toml_text()
+    full_text = text
     # Use full_text for expires search but limit to advisories area + preceding 30 lines
     # Simpler: search whole file for '# expires = YYYY-MM-DD' but only count those in or near advisories
     # For now, search in advisories section plus the 30 lines before it
@@ -132,7 +103,7 @@ def collect_expires_entries(text: str | None = None) -> list[tuple[str, datetime
     search_text = section
     if m:
         start = max(0, m.start() - 2000)  # ~30 lines
-        search_text = full_text[start : m.end() + len(section) + 2000]
+        search_text = full_text[start : m.end()] + section
     expires: list[tuple[str, datetime.date, int]] = []
     for idx, line in enumerate(search_text.splitlines(), start=1):
         # Match '# expires = YYYY-MM-DD' case-insensitive, allow spaces
@@ -153,27 +124,19 @@ def main() -> int:
     args = parser.parse_args()
 
     text = _read_deny_toml_text()
-    ignore_ids = collect_ignore_entries(text)
-    expires_entries = collect_expires_entries(text)
-
     errors: list[str] = []
-
-    # Zero-scan guard: must have scanned at least one ignore entry.
-    # This catches parser path bugs where ignore is not found and the gate would silently pass.
-    if not ignore_ids:
-        # Only error if the file actually has an [advisories] section; if the section is missing,
-        # that's also a zero-scan situation.
-        # Check if advisories section exists
-        if "[advisories]" in text:
+    ignore_ids: list[str] = []
+    expires_entries = collect_expires_entries(text)
+    try:
+        configured_count = len(_configured_ignore_entries(text))
+        ignore_ids = collect_ignore_entries(text)
+        if len(ignore_ids) != configured_count:
             errors.append(
-                "deny.toml advisories gate: no advisories ignore entries were scanned — "
-                "expected >0 entries (check deny.toml path logic)"
+                "deny.toml advisories gate: no advisories ignore entries were scanned "
+                "or configured entries were lost by the scanner"
             )
-        else:
-            errors.append(
-                "deny.toml advisories gate: no advisories section was scanned — "
-                "expected [advisories] with ignore entries"
-            )
+    except ValueError as error:
+        errors.append(str(error))
 
     # Also guard for expires scanning: if we have ignores but no expires comments, that's a missing expires error,
     # but also ensure we actually scanned expires. If expires list is empty while ignores >0, that's the M2/M3 case.

@@ -10,6 +10,44 @@ use orbisync_domain::{Timestamp, UserId};
 
 use crate::ApplicationError;
 
+/// Secret-free result of an explicitly requested local JWKS reload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExternalKeyReloadSummary {
+    /// Process-local generation, starting at one on startup.
+    pub generation: u64,
+    /// Number of active verification keys after publication.
+    pub key_count: usize,
+    /// Public key identifiers, sorted; no key material is returned.
+    pub key_ids: Vec<String>,
+}
+
+/// Mandatory evidence for a local verification-key reload attempt.
+#[derive(Debug, Clone)]
+pub struct ExternalKeyReloadAudit {
+    /// Authorized operator.
+    pub actor_id: UserId,
+    /// Server timestamp.
+    pub occurred_at: Timestamp,
+    /// Correlation identifier.
+    pub request_id: crate::RequestId,
+    /// Whether a validated candidate is being published.
+    pub succeeded: bool,
+    /// Published generation for success, current generation for rejection.
+    pub generation: u64,
+    /// Candidate or retained key count.
+    pub key_count: usize,
+}
+
+/// Durable, secret-free evidence required before publishing a key set.
+#[async_trait::async_trait]
+pub trait ExternalKeyAuditStore: Send + Sync + 'static {
+    /// Persists the attempt; failure prevents key replacement.
+    async fn record_reload(
+        &self,
+        event: ExternalKeyReloadAudit,
+    ) -> Result<(), crate::IdentityPortError>;
+}
+
 /// An external subject, as proven by a verified token.
 ///
 /// Only the fields the issuer authenticated are carried. Self-asserted claims

@@ -1,4 +1,5 @@
 import type { OrbiSyncClient } from "@orbisync/client";
+import { pagePath } from "../../shared/cursor_pages.mjs";
 
 export type User = {
   id: string;
@@ -22,7 +23,7 @@ export type WorldInstance = {
   revision: number;
 };
 
-type Page<T> = {
+export type Page<T> = {
   items: T[];
   next_cursor?: string | null;
 };
@@ -66,8 +67,8 @@ export class ReferenceApi {
     return this.request<User>("/v1/auth/me", { method: "GET" });
   }
 
-  async listWorlds(): Promise<World[]> {
-    return (await this.request<Page<World>>("/v1/worlds?limit=100", { method: "GET" })).items;
+  listWorlds(cursor: string | null = null): Promise<Page<World>> {
+    return this.request<Page<World>>(pagePath("worlds", cursor), { method: "GET" });
   }
 
   createWorld(name: string, capacity: number): Promise<World> {
@@ -78,8 +79,8 @@ export class ReferenceApi {
     });
   }
 
-  async listInstances(): Promise<WorldInstance[]> {
-    return (await this.request<Page<WorldInstance>>("/v1/instances?limit=100", { method: "GET" })).items;
+  listInstances(cursor: string | null = null): Promise<Page<WorldInstance>> {
+    return this.request<Page<WorldInstance>>(pagePath("instances", cursor), { method: "GET" });
   }
 
   createInstance(worldId: string, capacity: number): Promise<WorldInstance> {

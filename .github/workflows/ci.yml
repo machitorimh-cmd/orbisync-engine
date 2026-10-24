@@ -150,6 +150,16 @@ jobs:
         run: python -m unittest scripts/test_zero_scan_guard.py
       - name: Gate coverage (PREVENT-0)
         run: python scripts/check_ci_gate_coverage.py
+      - name: Validate Prometheus alert rules and firing behavior
+        run: |
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/deploy/prometheus:/work:ro" -w /work \
+            prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
+            check rules orbisync-alerts.yml
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/deploy/prometheus:/work:ro" -w /work \
+            prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
+            test rules orbisync-alerts.test.yml
 
   sdk-typescript:
     name: TypeScript SDK
@@ -194,6 +204,49 @@ jobs:
       - name: Tests (round-trip + W-20 reconnect e2e with real server)
         working-directory: sdk/typescript
         run: npm test
+      - name: Build the distributable SDK used by reference apps
+        working-directory: sdk/typescript
+        run: npm run build
+      - name: Install frontend dependencies from their lockfiles
+        run: |
+          npm ci --prefix apps/admin-console-web
+          npm ci --prefix apps/reference-console-web
+          npm ci --prefix apps/whiteboard
+      - name: Type-check, unit-test and build the admin console
+        working-directory: apps/admin-console-web
+        run: |
+          npm run check
+          npm run test:unit
+          npm run build
+          npm audit --audit-level=high
+      - name: Type-check, test and build the reference console
+        working-directory: apps/reference-console-web
+        run: |
+          npm run check
+          npm test
+          npm run build
+          npm audit --audit-level=high
+      - name: Type-check, test and build the whiteboard
+        working-directory: apps/whiteboard
+        run: |
+          npm run check
+          npm test
+          npm run build
+          npm audit --audit-level=high
+      # The apps use different lockfile-pinned Playwright versions. Install the
+      # matching Chromium for each local CLI; never download a latest npx CLI.
+      - name: Install admin browser runtime
+        working-directory: apps/admin-console-web
+        run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Install reference browser runtime
+        working-directory: apps/whiteboard
+        run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Admin operations browser regressions
+        working-directory: apps/admin-console-web
+        run: npm run test:browser
+      - name: Both reference apps pagination browser regressions
+        working-directory: apps/whiteboard
+        run: npm run test:browser
 
   npm-audit:
     name: TypeScript dependency advisories

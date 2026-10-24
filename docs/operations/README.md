@@ -11,8 +11,10 @@
 | [Backup / Restore](backup-restore.md) | 定期backup、復旧訓練、データ復元 | 復元先、復旧時点、現行backupの保全 |
 | [Incident Response](incident-response.md) | security/availability incident | incident commanderと証跡保全 |
 | [Secret Rotation](secret-rotation.md) | JWT、DB、Webhook secret更新 | overlap期間とrollback secret |
+| [認証発行制限・セッション管理](authentication-sessions.md) | 発行予算の調整、端末の個別失効 | 対象セッションと管理権限の確認 |
 | [Migration Recovery](migration-recovery.md) | schema migration失敗 | migration状態とbackup確認 |
 | [Graceful Shutdown](graceful-shutdown.md) | deploy、保守、緊急停止 | drain期限と接続影響の周知 |
 | [Deployment](deployment.md) | Docker Composeでのローカル起動 | ComposeはTLS・backup・監視を提供しない前提の確認 |
+| [Presence / Persistence Diagnostics](diagnostics-and-alerts.md) | 再接続・Membership不整合、永続化遅延、通知ルールの設定 | 観測時刻、対象ノード、環境別の閾値と通知先の確認 |
 
 各手順はコマンド名を契約として示すが、サーバー実装前のため実在を保証しない。実装時はCLI名を維持するか、このRunbookと同時に変更する。

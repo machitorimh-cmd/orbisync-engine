@@ -18,6 +18,7 @@ import {
   type WorldInstance,
 } from "./api.js";
 import "./styles.css";
+import { CursorPages } from "../../shared/cursor_pages.mjs";
 
 type LogLevel = "info" | "success" | "error";
 type TrackedEntity = {
@@ -42,11 +43,17 @@ const loginBtn = element<HTMLButtonElement>("loginBtn");
 const logoutBtn = element<HTMLButtonElement>("logoutBtn");
 const authStatusEl = element<HTMLSpanElement>("authStatus");
 const worldSelect = element<HTMLSelectElement>("worldSelect");
+const worldFilter = element<HTMLInputElement>("worldFilter");
+const moreWorldsBtn = element<HTMLButtonElement>("moreWorldsBtn");
+const worldCount = element<HTMLElement>("worldCount");
 const worldNameEl = element<HTMLInputElement>("worldName");
 const worldCapacityEl = element<HTMLInputElement>("worldCapacity");
 const refreshBtn = element<HTMLButtonElement>("refreshBtn");
 const createWorldBtn = element<HTMLButtonElement>("createWorldBtn");
 const instanceSelect = element<HTMLSelectElement>("instanceSelect");
+const instanceFilter = element<HTMLInputElement>("instanceFilter");
+const moreInstancesBtn = element<HTMLButtonElement>("moreInstancesBtn");
+const instanceCount = element<HTMLElement>("instanceCount");
 const instanceCapacityEl = element<HTMLInputElement>("instanceCapacity");
 const createInstanceBtn = element<HTMLButtonElement>("createInstanceBtn");
 const startInstanceBtn = element<HTMLButtonElement>("startInstanceBtn");
@@ -83,6 +90,10 @@ let api: ReferenceApi | null = null;
 let currentUser: User | null = null;
 let worlds: World[] = [];
 let instances: WorldInstance[] = [];
+const worldPages = new CursorPages<World>();
+const instancePages = new CursorPages<WorldInstance>();
+let authGeneration = 0;
+let loginBusy = false;
 let connection: OrbiSyncConnection | null = null;
 let instance: OrbiSyncInstance | null = null;
 let unsubscribeConnectionState: (() => void) | null = null;
@@ -154,7 +165,12 @@ function syncControls(): void {
   const entitySelected = joined && entities.has(entitySelect.value);
 
   logoutBtn.disabled = !authenticated;
-  refreshBtn.disabled = !authenticated;
+  loginBtn.disabled = loginBusy;
+  refreshBtn.disabled = !authenticated || worldPages.busy || instancePages.busy;
+  moreWorldsBtn.disabled = !authenticated || worldPages.busy || !worldPages.nextCursor;
+  moreInstancesBtn.disabled = !authenticated || instancePages.busy || !instancePages.nextCursor;
+  worldCount.textContent = `${filteredWorlds().length} / ${worlds.length}件 読み込み済み${worldPages.busy ? "・取得中" : ""}`;
+  instanceCount.textContent = `${filteredInstances().length} / ${instances.length}件 読み込み済み${instancePages.busy ? "・取得中" : ""}`;
   createWorldBtn.disabled = !authenticated;
   worldSelect.disabled = !authenticated || worlds.length === 0;
   createInstanceBtn.disabled = !authenticated || world === null;
@@ -172,19 +188,26 @@ function syncControls(): void {
 }
 
 function filteredInstances(): WorldInstance[] {
-  return instances.filter((candidate) => candidate.world_id === worldSelect.value);
+  const query = instanceFilter.value.trim().toLocaleLowerCase();
+  return instances.filter(candidate => candidate.world_id === worldSelect.value && `${candidate.id} ${candidate.status}`.toLocaleLowerCase().includes(query));
+}
+
+function filteredWorlds(): World[] {
+  const query = worldFilter.value.trim().toLocaleLowerCase();
+  return worlds.filter(world => `${world.id} ${world.name} ${world.status}`.toLocaleLowerCase().includes(query));
 }
 
 function renderWorlds(preferredId?: string): void {
   const previous = preferredId ?? worldSelect.value;
   worldSelect.replaceChildren();
-  for (const world of worlds) {
+  const visible = filteredWorlds();
+  for (const world of visible) {
     const option = document.createElement("option");
     option.value = world.id;
     option.textContent = `${world.name} | ${world.status}`;
     worldSelect.append(option);
   }
-  if (worlds.some((world) => world.id === previous)) worldSelect.value = previous;
+  if (visible.some((world) => world.id === previous)) worldSelect.value = previous;
   renderInstances();
 }
 
@@ -211,16 +234,38 @@ function renderInstances(preferredId?: string): void {
 
 async function refreshResources(preferredWorldId?: string, preferredInstanceId?: string): Promise<void> {
   if (!api) throw new Error("先にログインしてください");
-  [worlds, instances] = await Promise.all([api.listWorlds(), api.listInstances()]);
-  renderWorlds(preferredWorldId);
-  if (preferredInstanceId) renderInstances(preferredInstanceId);
-  log(`World ${worlds.length}件 / Instance ${instances.length}件を取得`, "success");
+  resetResources();
+  await Promise.all([loadWorldPage(preferredWorldId), loadInstancePage(preferredInstanceId)]);
+}
+
+function resetResources(): void {
+  worldPages.reset(); instancePages.reset(); worlds = []; instances = []; renderWorlds();
+}
+
+async function loadWorldPage(preferredId?: string): Promise<void> {
+  const source = api;
+  if (!source) return;
+  const pending = worldPages.load(cursor => source.listWorlds(cursor));
+  syncControls();
+  try {
+    if (await pending && api === source) { worlds = worldPages.items; renderWorlds(preferredId); }
+  } finally { syncControls(); }
+}
+
+async function loadInstancePage(preferredId?: string): Promise<void> {
+  const source = api;
+  if (!source) return;
+  const pending = instancePages.load(cursor => source.listInstances(cursor));
+  syncControls();
+  try {
+    if (await pending && api === source) { instances = instancePages.items; renderInstances(preferredId); }
+  } finally { syncControls(); }
 }
 
 async function disconnectRealtime(): Promise<void> {
   unsubscribeConnectionState?.();
   unsubscribeConnectionState = null;
-  if (connection) await connection.disconnect();
+  const previous = connection;
   connection = null;
   instance = null;
   transformPending = false;
@@ -234,6 +279,7 @@ async function disconnectRealtime(): Promise<void> {
   overallStatusEl.textContent = currentUser ? "認証済み" : "未接続";
   overallDotEl.dataset.state = currentUser ? "success" : "";
   syncControls();
+  if (previous) await previous.disconnect();
 }
 
 function handleConnectionState(state: ConnectionState): void {
@@ -390,9 +436,14 @@ function moveSelected(dx: number, dy: number): void {
 }
 
 loginBtn.addEventListener("click", () => void runAction(loginBtn, async () => {
+  if (loginBusy) return;
   const baseUrl = normalizeServerUrl(serverUrlEl.value);
   const loginId = loginIdEl.value.trim();
   if (!loginId || !passwordEl.value) throw new Error("Login IDとPasswordを入力してください");
+  const generation = ++authGeneration;
+  loginBusy = true;
+  client = null; api = null; currentUser = null; resetResources();
+  try {
   if (connection) await disconnectRealtime();
   const nextClient = new OrbiSyncClient({
     baseUrl,
@@ -403,6 +454,7 @@ loginBtn.addEventListener("click", () => void runAction(loginBtn, async () => {
   await nextClient.auth.login({ loginId, password: passwordEl.value });
   const nextApi = new ReferenceApi(nextClient);
   const user = await nextApi.currentUser();
+  if (generation !== authGeneration) return;
   client = nextClient;
   api = nextApi;
   currentUser = user;
@@ -414,13 +466,19 @@ loginBtn.addEventListener("click", () => void runAction(loginBtn, async () => {
   overallDotEl.dataset.state = "success";
   log(`SDK login成功: ${user.login_id} / ${baseUrl}`, "success");
   await refreshResources();
+  } catch (error) { if (generation === authGeneration) throw error;
+  } finally { if (generation === authGeneration) loginBusy = false; }
 }));
 
 logoutBtn.addEventListener("click", () => void runAction(logoutBtn, async () => {
+  const generation = ++authGeneration;
+  const previousApi = api;
+  client = null; api = null; currentUser = null; resetResources();
   if (connection) await disconnectRealtime();
   try {
-    await api?.logout();
+    await previousApi?.logout();
   } finally {
+    if (generation !== authGeneration) return;
     client = null;
     api = null;
     currentUser = null;
@@ -438,40 +496,67 @@ logoutBtn.addEventListener("click", () => void runAction(logoutBtn, async () => 
 }));
 
 refreshBtn.addEventListener("click", () => void runAction(refreshBtn, () => refreshResources()));
+moreWorldsBtn.addEventListener("click", () => void runAction(moreWorldsBtn, () => loadWorldPage()));
+moreInstancesBtn.addEventListener("click", () => void runAction(moreInstancesBtn, () => loadInstancePage()));
+worldFilter.addEventListener("input", () => void runAction(moreWorldsBtn, async () => {
+  worldPages.reset(); instancePages.reset(); worlds = []; instances = []; renderWorlds();
+  await Promise.all([loadWorldPage(), loadInstancePage()]);
+}));
+instanceFilter.addEventListener("input", () => void runAction(moreInstancesBtn, async () => {
+  instancePages.reset(); instances = []; renderInstances(); await loadInstancePage();
+}));
+serverUrlEl.addEventListener("input", () => {
+  ++authGeneration; loginBusy = false; client = null; api = null; currentUser = null;
+  resetResources(); authStatusEl.textContent = "サーバー変更後は再ログインしてください";
+  authStatusEl.dataset.state = "";
+  void disconnectRealtime();
+});
 createWorldBtn.addEventListener("click", () => void runAction(createWorldBtn, async () => {
   if (!api) throw new Error("先にログインしてください");
+  const source = api;
   const name = worldNameEl.value.trim();
   if (!name) throw new Error("World名を入力してください");
-  const created = await api.createWorld(name, parseCapacity(worldCapacityEl));
+  const created = await source.createWorld(name, parseCapacity(worldCapacityEl));
+  if (api !== source) return;
   log(`World作成: ${created.name} (${created.id})`, "success");
   worldNameEl.value = `reference-${Date.now().toString(36)}`;
-  await refreshResources(created.id);
+  worldFilter.value = ""; worldPages.upsert(created); worlds = worldPages.items; renderWorlds(created.id);
+  instancePages.reset(); instances = []; renderInstances(); await loadInstancePage();
 }));
 
-worldSelect.addEventListener("change", () => renderInstances());
+worldSelect.addEventListener("change", () => void runAction(moreInstancesBtn, async () => {
+  instancePages.reset(); instances = []; renderInstances(); await loadInstancePage();
+}));
 instanceSelect.addEventListener("change", syncControls);
 createInstanceBtn.addEventListener("click", () => void runAction(createInstanceBtn, async () => {
   if (!api || !selectedWorld()) throw new Error("Worldを選択してください");
-  const created = await api.createInstance(worldSelect.value, parseCapacity(instanceCapacityEl));
+  const source = api;
+  const created = await source.createInstance(worldSelect.value, parseCapacity(instanceCapacityEl));
+  if (api !== source) return;
   log(`Instance作成: ${created.id}`, "success");
-  await refreshResources(worldSelect.value, created.id);
+  instanceFilter.value = ""; instancePages.upsert(created); instances = instancePages.items; renderInstances(created.id);
 }));
 
 startInstanceBtn.addEventListener("click", () => void runAction(startInstanceBtn, async () => {
   if (!api || !selectedInstance()) throw new Error("Instanceを選択してください");
-  const started = await api.startInstance(instanceSelect.value);
+  const source = api;
+  const started = await source.startInstance(instanceSelect.value);
+  if (api !== source) return;
   log(`Instance起動受付: ${started.id} status=${started.status}`, "success");
-  await refreshResources(worldSelect.value, started.id);
+  instancePages.upsert(started); instances = instancePages.items; renderInstances(started.id);
 }));
 
 joinBtn.addEventListener("click", () => void runAction(joinBtn, async () => {
   if (!client || selectedInstance()?.status !== "running") throw new Error("running状態のInstanceを選択してください");
-  const nextConnection = await client.connect();
+  const source = client, generation = authGeneration, selectedId = instanceSelect.value;
+  const nextConnection = await source.connect();
+  if (source !== client || generation !== authGeneration) { await nextConnection.disconnect(); return; }
   connection = nextConnection;
   lastPhase = "connected";
   unsubscribeConnectionState = nextConnection.onConnectionStateChange(handleConnectionState);
   try {
-    const joined = await nextConnection.join(instanceSelect.value);
+    const joined = await nextConnection.join(selectedId);
+    if (source !== client || generation !== authGeneration) { await nextConnection.disconnect(); return; }
     instance = joined;
     joined.on("entityUpdated", handleEntityUpdate);
     joined.on("error", handleRealtimeError);
@@ -479,6 +564,7 @@ joinBtn.addEventListener("click", () => void runAction(joinBtn, async () => {
     joined.on("resumeAccepted", () => log("ResumeAcceptedを受信", "success"));
     joined.on("resyncRequired", () => log("ResyncRequiredを受信。SDKが再joinします。"));
     await joined.ready();
+    if (source !== client || generation !== authGeneration) return;
     const info = joined.getJoinInfo();
     joinInfoEl.textContent = `user=${info.userId} | presence=${info.presenceId} | nearby=${info.nearbyEntityCount} | permissions spawn:${info.permissions.entitySpawn} own:${info.permissions.entityUpdateOwn} any:${info.permissions.entityUpdateAny}`;
     log(`Realtime参加成功: instance=${info.instanceId} presence=${info.presenceId}`, "success");

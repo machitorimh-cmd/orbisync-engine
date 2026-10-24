@@ -70,6 +70,12 @@ impl PgIdentityQueryStore {
         Self { pool, codec }
     }
 
+    /// Shares the explicitly configured signing codec with other query adapters.
+    #[must_use]
+    pub fn cursor_codec(&self) -> CursorCodec {
+        self.codec.clone()
+    }
+
     fn decode_users_cursor(&self, page: &PageRequest) -> Result<Option<Uuid>, IdentityPortError> {
         let Some(cursor) = &page.after else {
             return Ok(None);
@@ -109,12 +115,12 @@ impl PgIdentityQueryStore {
             let fh = self.audit_filter_hash(filter);
             let (ts_millis, id_str) = self
                 .codec
-                .decode_audit(&cursor.0, &fh)
+                .decode_audit_precise(&cursor.0, &fh)
                 .map_err(|_| IdentityPortError::InvalidRequest)?;
-            let ts = Timestamp::from_unix_millis(ts_millis)
+            let ts = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ts_millis) * 1_000)
                 .map_err(|_| IdentityPortError::InvalidRequest)?;
             let id = Uuid::parse_str(&id_str).map_err(|_| IdentityPortError::InvalidRequest)?;
-            Ok(Some((ts.as_offset_date_time(), id)))
+            Ok(Some((ts, id)))
         } else {
             // Legacy plain UUID cursor for backwards compatibility in tests: treat as id only,
             // but audit ordering requires timestamp. Map to InvalidRequest if used with new ordering
@@ -124,21 +130,7 @@ impl PgIdentityQueryStore {
     }
 
     fn audit_filter_hash(&self, filter: &AuditFilter) -> String {
-        let from_millis = filter.from.map(|t| {
-            (t.as_offset_date_time().unix_timestamp() * 1000)
-                + i64::from(t.as_offset_date_time().millisecond())
-        });
-        let to_millis = filter.to.map(|t| {
-            (t.as_offset_date_time().unix_timestamp() * 1000)
-                + i64::from(t.as_offset_date_time().millisecond())
-        });
-        let actor = filter.actor_id.map(|id| id.to_string());
-        self.codec.audit_filter_hash(
-            from_millis,
-            to_millis,
-            actor.as_deref(),
-            filter.action.as_deref(),
-        )
+        self.codec.audit_filter_binding(filter)
     }
 }
 
@@ -348,6 +340,17 @@ impl AuditQueryPort for PgIdentityQueryStore {
         if let Some(value) = filter.action.clone() {
             query.push(" AND action = ").push_bind(value);
         }
+        if let Some(value) = &filter.resource_type {
+            query.push(" AND target_type = ").push_bind(value);
+        }
+        if let Some(value) = &filter.resource_id {
+            query.push(" AND target_id = ").push_bind(value);
+        }
+        if let Some(value) = &filter.request_id {
+            query
+                .push(" AND audit_events.request_id = ")
+                .push_bind(value);
+        }
         if let Some((ts, id)) = self.decode_audit_cursor(&page, &filter)? {
             query
                 .push(" AND (occurred_at, id) < (")
@@ -373,12 +376,17 @@ impl AuditQueryPort for PgIdentityQueryStore {
         let next = if more {
             match items.last() {
                 Some(last) => {
-                    let ts_millis = last.occurred_at.as_offset_date_time().unix_timestamp() * 1000
-                        + i64::from(last.occurred_at.as_offset_date_time().millisecond());
+                    let ts_millis = i64::try_from(
+                        last.occurred_at
+                            .as_offset_date_time()
+                            .unix_timestamp_nanos()
+                            / 1_000,
+                    )
+                    .map_err(|_| IdentityPortError::DataCorruption)?;
                     let fh = self.audit_filter_hash(&filter);
                     let cursor = self
                         .codec
-                        .encode_audit(ts_millis, &last.id, &fh)
+                        .encode_audit_precise(ts_millis, &last.id, &fh)
                         .map_err(|_| IdentityPortError::DataCorruption)?;
                     Some(QueryCursor(cursor))
                 }

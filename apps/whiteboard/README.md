@@ -62,3 +62,26 @@ it does not undo commands already received by Core. Join replacement logs the nu
 of unconfirmed operations being abandoned. Requests belong to the correlation scope
 that created them and cannot be submitted through a new instance/session helper.
 Old callbacks cannot update the new instance UI or resume its creation sequence.
+
+## World / Instanceの追加取得
+
+「一覧を更新」で先頭ページを取得し、「さらに100件」で1ページずつ追加します。
+World・Instanceの絞り込みは読み込み済みの一覧だけを対象とし、World選択時はそのWorldのInstanceを表示します。
+検索・World選択・接続先の変更時はcursorを破棄し、先頭から取得し直します。
+追加取得失敗時は取得済み一覧とcursorを保持し、同じボタンで再試行できます。
+World一覧への権限がなくても、取得可能なInstance一覧は利用できます。
+各一覧の保持は10,000件・1,000ページまでで、上限時は一覧を更新してください。
+
+```bash
+npm --prefix sdk/typescript ci
+npm --prefix sdk/typescript run build
+npm --prefix apps/whiteboard ci
+npm --prefix apps/whiteboard run check
+npm --prefix apps/whiteboard test
+npm --prefix apps/whiteboard run build
+# Chromiumを準備済みの環境で、両アプリの101件目・失敗再試行・連打・接続先変更を確認
+npm --prefix apps/whiteboard exec playwright install chromium
+npm --prefix apps/whiteboard run test:browser
+```
+
+画面回帰はREST応答をテスト内で差し替え、Viteを自動起動します。Core・DBは不要です。

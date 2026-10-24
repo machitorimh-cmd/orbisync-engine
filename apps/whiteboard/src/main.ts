@@ -2,9 +2,12 @@ import { OrbiSyncClient, uuidv7, type SyncedEntity, type OrbiSyncInstance } from
 import { notePayload } from "../rules/whiteboard-state.mjs";
 import { ConfirmedCommands, CommandUncertain, type Request } from "./confirmed_commands.js";
 import { NoteBoard, type Note } from "./note_board.js";
+import { CursorPages } from "../../shared/cursor_pages.mjs";
+import { resourcePage, type World, type WorldInstance } from "./resources.js";
 import "./style.css";
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 let client:OrbiSyncClient|null=null;let instance:OrbiSyncInstance|null=null;let joined=false;const notes=new Map<string,Note>();let commands:ConfirmedCommands|null=null;const colors=["yellow","rose","mint","blue"];
+const worldPages=new CursorPages<World>();const instancePages=new CursorPages<WorldInstance>();let authGeneration=0;let loginBusy=false;let joinBusy=false;
 const boardView=new NoteBoard($("board"),{
   text:(id,text)=>{const note=notes.get(id);if(!note||!joined||!commands)return false;update(note,{text});return true},
   lock:id=>{const note=notes.get(id);if(note)toggleLock(note)},
@@ -66,19 +69,89 @@ function selectedMethod():"local"|"guest"|"name_only"{return ($("authMethod") as
 function syncAuthFields(){const m=selectedMethod();($("localFields") as HTMLElement).hidden=m!=="local";($("nameFields") as HTMLElement).hidden=m!=="name_only"}
 // サーバーが実際に受け付ける方式だけを選べるようにする。無効な方式を選んで
 // 403を受け取るより、選択肢から消えている方が利用者にとって分かりやすい。
-async function refreshMethods(){const server=($("server") as HTMLInputElement).value.trim();try{const r=await fetch(`${server}/v1/auth/methods`);if(!r.ok)return;const d=await r.json() as {methods?:string[]};const allowed=new Set(d.methods??[]);const s=$("authMethod") as HTMLSelectElement;for(const o of Array.from(s.options))o.hidden=!allowed.has(o.value);if(s.selectedOptions[0]?.hidden){const first=Array.from(s.options).find(o=>!o.hidden);if(first)s.value=first.value}syncAuthFields()}catch{/* 未起動なら既定の選択肢のまま */}}
-async function login(){const server=($("server") as HTMLInputElement).value.trim();client=new OrbiSyncClient({baseUrl:server});const method=selectedMethod();try{if(method==="guest")await client.auth.guest();else if(method==="name_only"){const name=($("displayName") as HTMLInputElement).value.trim();if(!name)return message("表示名を入力してください。");await client.auth.nameOnly({displayName:name})}else await client.auth.login({loginId:($("loginId") as HTMLInputElement).value.trim(),password:($("password") as HTMLInputElement).value});$("connection").textContent="認証済み";$("connection").className="status online";message(method==="local"?"ログインしました。instance一覧を読み込めます":"参加しました。instance一覧を読み込めます")}catch(e){const disabled=(e as {code?:string})?.code==="AUTH_METHOD_DISABLED";message(disabled?"この参加方式はサーバーで有効になっていません。":`参加失敗: ${e instanceof Error?e.message:String(e)}`)}}
-async function load(){if(!client)return message("先にログインしてください。");try{const r=await fetch(`${client.getBaseUrl()}/v1/instances`,{headers:{Authorization:`Bearer ${client._getAccessToken()}`}});if(!r.ok)throw Error(`instance一覧 ${r.status}`);const d=await r.json() as {items?:Array<{id:string;world_id:string;status:string;revision:number}>};const s=$("instances") as HTMLSelectElement;s.replaceChildren();for(const i of d.items??[]){const o=document.createElement("option");o.value=i.id;o.textContent=`${i.id.slice(0,8)}… (${i.status})`;s.appendChild(o)}message(`${d.items?.length??0}件読み込みました`)}catch(e){message(`一覧取得失敗: ${e instanceof Error?e.message:String(e)}`)}}
-async function join(){
+async function refreshMethods(){const generation=authGeneration;const server=($("server") as HTMLInputElement).value.trim();try{const r=await fetch(`${server}/v1/auth/methods`);if(!r.ok)return;const d=await r.json() as {methods?:string[]};if(generation!==authGeneration||server!==($<HTMLInputElement>("server").value.trim()))return;const allowed=new Set(d.methods??[]);const s=$("authMethod") as HTMLSelectElement;for(const o of Array.from(s.options))o.hidden=!allowed.has(o.value);if(s.selectedOptions[0]?.hidden){const first=Array.from(s.options).find(o=>!o.hidden);if(first)s.value=first.value}syncAuthFields()}catch{/* 未起動なら既定の選択肢のまま */}}
+function resourceControls(){
+  ($("login") as HTMLButtonElement).disabled=loginBusy;
+  ($("load") as HTMLButtonElement).disabled=!client||worldPages.busy||instancePages.busy;
+  ($("moreWorlds") as HTMLButtonElement).disabled=!client||worldPages.busy||!worldPages.nextCursor;
+  ($("moreInstances") as HTMLButtonElement).disabled=!client||instancePages.busy||!instancePages.nextCursor;
+  ($("join") as HTMLButtonElement).disabled=joinBusy||!client||!($<HTMLSelectElement>("instances").value);
+}
+function renderResources(){
+  const worldSelect=$<HTMLSelectElement>("worlds"),previousWorld=worldSelect.value;
+  const query=$<HTMLInputElement>("worldFilter").value.trim().toLocaleLowerCase();
+  worldSelect.replaceChildren(new Option("すべてのWorld", ""));
+  for(const world of worldPages.items){if(!`${world.id} ${world.name} ${world.status}`.toLocaleLowerCase().includes(query))continue;worldSelect.add(new Option(`${world.name} (${world.status})`,world.id))}
+  if(Array.from(worldSelect.options).some(o=>o.value===previousWorld))worldSelect.value=previousWorld;
+  const instanceSelect=$<HTMLSelectElement>("instances"),previousInstance=instanceSelect.value;
+  const instanceQuery=$<HTMLInputElement>("instanceFilter").value.trim().toLocaleLowerCase();
+  instanceSelect.replaceChildren();
+  for(const item of instancePages.items){if(worldSelect.value&&item.world_id!==worldSelect.value)continue;if(!`${item.id} ${item.status}`.toLocaleLowerCase().includes(instanceQuery))continue;instanceSelect.add(new Option(`${item.id.slice(0,8)}… (${item.status})`,item.id))}
+  if(!instanceSelect.options.length)instanceSelect.add(new Option("該当なし・続きを読み込めます", ""));
+  if(Array.from(instanceSelect.options).some(o=>o.value===previousInstance))instanceSelect.value=previousInstance;
+  $("pageCount").textContent=`World ${worldPages.items.length}件 / Instance ${instancePages.items.length}件 読み込み済み`;
+  resourceControls();
+}
+function resetResources(){worldPages.reset();instancePages.reset();renderResources()}
+async function leaveBoard(){
+  const previous=instance;instance=null;joined=false;commands?.dispose();commands=null;creations.clear();notes.clear();syncControls();
+  if(previous)await previous.leave();
+}
+function invalidateServer(){
+  ++authGeneration;loginBusy=false;client=null;resetResources();
+  $("connection").textContent="未接続";$("connection").className="status offline";
+  void leaveBoard().catch(error=>log(`切断: ${error instanceof Error?error.message:String(error)}`));
+}
+async function login(){
+  if(loginBusy)return;
+  const generation=++authGeneration;loginBusy=true;client=null;resetResources();
+  const server=$<HTMLInputElement>("server").value.trim(),method=selectedMethod();
+  try{
+    const candidate=new OrbiSyncClient({baseUrl:server});
+    await leaveBoard();
+    if(generation!==authGeneration)return;
+    if(method==="guest")await candidate.auth.guest();
+    else if(method==="name_only"){const name=$<HTMLInputElement>("displayName").value.trim();if(!name)throw new Error("表示名を入力してください。");await candidate.auth.nameOnly({displayName:name})}
+    else await candidate.auth.login({loginId:$<HTMLInputElement>("loginId").value.trim(),password:$<HTMLInputElement>("password").value});
+    if(generation!==authGeneration)return;
+    client=candidate;$<HTMLInputElement>("password").value="";
+    $("connection").textContent="認証済み";$("connection").className="status online";
+    message("参加しました。World / Instance一覧を読み込めます");
+  }catch(error){if(generation!==authGeneration)return;const disabled=(error as {code?:string})?.code==="AUTH_METHOD_DISABLED";message(disabled?"この参加方式はサーバーで有効になっていません。":`参加失敗: ${error instanceof Error?error.message:String(error)}`)}
+  finally{if(generation===authGeneration)loginBusy=false;resourceControls()}
+}
+async function loadWorldPage(){
+  const source=client;if(!source)return;
+  const pending=worldPages.load(cursor=>resourcePage<World>(source,"worlds",cursor));resourceControls();
+  try{if(await pending&&client===source)renderResources()}
+  finally{resourceControls()}
+}
+async function loadInstancePage(){
+  const source=client;if(!source)return;
+  const pending=instancePages.load(cursor=>resourcePage<WorldInstance>(source,"instances",cursor));resourceControls();
+  try{if(await pending&&client===source)renderResources()}
+  finally{resourceControls()}
+}
+async function resourceAction(action:()=>Promise<unknown>){try{await action()}catch(error){message(`一覧取得失敗: ${error instanceof Error?error.message:String(error)}。同じボタンで再試行できます`)}finally{resourceControls()}}
+async function load(){
   if(!client)return message("先にログインしてください。");
+  resetResources();
+  // A guest may list joinable Instances without permission to list Worlds.
+  await Promise.all([resourceAction(loadWorldPage),resourceAction(loadInstancePage)]);
+}
+async function join(){
+  if(joinBusy)return;
+  if(!client)return message("先にログインしてください。");
+  const source=client,generation=authGeneration;
   const id=($("instances") as HTMLSelectElement).value;if(!id)return message("instanceを選択してください。");
-  ($("join") as HTMLButtonElement).disabled=true;
+  joinBusy=true;resourceControls();
   try{
     const abandoned=commands?.unresolvedCount??0;
     if(abandoned)message(`前の入室の未確定操作${abandoned}件の追跡を終了します。次の入室へ再送しません。既に送信した操作の取消ではありません。`);
     const previous=instance;instance=null;joined=false;commands?.dispose();commands=null;creations.clear();notes.clear();syncControls();if(previous)await previous.leave();
-    const conn=await client.connectWithRetry();
-    try { instance=await conn.join(id); } catch(error) { await conn.disconnect();throw error; }
+    const conn=await source.connectWithRetry();
+    if(source!==client||generation!==authGeneration){await conn.disconnect();return}
+    try { const candidate=await conn.join(id);if(source!==client||generation!==authGeneration){await conn.disconnect();return}instance=candidate; } catch(error) { await conn.disconnect();throw error; }
     const current=instance;commands=new ConfirmedCommands(current, ()=>{render();renderCreations()}, (confirmed, request)=>{queueMicrotask(()=>{
       if(instance!==current||!commands)return;
       const creation=creations.get(request.entityId);
@@ -94,7 +167,7 @@ async function join(){
     syncControls();await current.ready();if(instance!==current)return;
     refreshState();syncControls();$("connection").textContent="接続中";message("入室しました。変更はOrbiSyncの確定後に共有されます");
   }catch(error){message(`入室失敗: ${error instanceof Error?error.message:String(error)}`);syncControls()}
-  finally{($("join") as HTMLButtonElement).disabled=false}
+  finally{joinBusy=false;resourceControls()}
 }
 type Creation={note:Note;request:Request;phase:"spawn"|"update";busy:boolean;error:string};
 const creations=new Map<string,Creation>();
@@ -128,4 +201,13 @@ function add(){if(!joined||!commands)return;if(creations.size>=16)return message
   const creation:Creation={note,phase:"spawn",busy:false,error:"",request:commands.request({entityId:note.id,operation:"spawn",expectedRevision:0n,args:notePayload(note)})};
   creations.set(note.id,creation);void completeCreation(creation)
 }
-$("authMethod").addEventListener("change",syncAuthFields);$("server").addEventListener("change",()=>void refreshMethods());$("login").addEventListener("click",()=>void login());$("load").addEventListener("click",()=>void load());$("join").addEventListener("click",()=>void join());$("add").addEventListener("click",add);render();
+$("authMethod").addEventListener("change",syncAuthFields);
+$("server").addEventListener("input",invalidateServer);
+$("server").addEventListener("change",()=>void refreshMethods());
+$("login").addEventListener("click",()=>void login());$("load").addEventListener("click",()=>void load());
+$("moreWorlds").addEventListener("click",()=>void resourceAction(loadWorldPage));
+$("moreInstances").addEventListener("click",()=>void resourceAction(loadInstancePage));
+$("worldFilter").addEventListener("input",()=>{worldPages.reset();instancePages.reset();renderResources();void Promise.all([resourceAction(loadWorldPage),resourceAction(loadInstancePage)])});
+for(const [id,event] of [["worlds","change"],["instanceFilter","input"]])$(id!).addEventListener(event!,()=>{instancePages.reset();renderResources();void resourceAction(loadInstancePage)});
+$("instances").addEventListener("change",resourceControls);
+$("join").addEventListener("click",()=>void join());$("add").addEventListener("click",add);render();renderResources();

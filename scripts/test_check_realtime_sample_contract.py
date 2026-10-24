@@ -8,6 +8,15 @@ from scripts import check_realtime_ticket_contract as tickets
 
 
 class RealtimeSampleContractTests(unittest.TestCase):
+    def test_reference_sdk_default_accepts_captured_client_and_rejects_override(self) -> None:
+        prefix = "const client = new OrbiSyncClient({baseUrl: server}); "
+        self.assertTrue(contract.reference_uses_sdk_default(prefix + "await client.connect();"))
+        self.assertTrue(contract.reference_uses_sdk_default(prefix + "const source = client; await source.connect();"))
+        self.assertTrue(contract.reference_uses_sdk_default(prefix + "const source = client, generation = version; await source.connect();"))
+        self.assertFalse(contract.reference_uses_sdk_default(prefix + "await other.connect();"))
+        self.assertFalse(contract.reference_uses_sdk_default(prefix + "const source = other; await source.connect();"))
+        self.assertFalse(contract.reference_uses_sdk_default(prefix + "const source = client; await source.connect({path:'/custom'});"))
+
     def copy_inputs(self, root: Path) -> None:
         for relative in contract._REQUIRED_FILES:
             target = root / relative

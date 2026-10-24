@@ -530,6 +530,7 @@ async fn handle_socket(
                 let resume_outcome = decide_resume(ch_opt, rs_opt);
                 if resume_outcome.decision != orbisync_realtime::ResumeDecision::AcceptResumeRequest
                 {
+                    state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::TokenMismatch });
                     let rs = orbisync_protocol::v1::ResyncRequired {
                         reason_code: orbisync_realtime::RESUME_TOKEN_MISMATCH.to_owned(),
                         current_revision: 0,
@@ -570,6 +571,7 @@ async fn handle_socket(
                 let binding = match consumed {
                     Some(b) => b,
                     None => {
+                        state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::HistoryUnavailable });
                         let rs = orbisync_protocol::v1::ResyncRequired {
                             reason_code: "history_unavailable".to_owned(),
                             current_revision: 0,
@@ -597,6 +599,7 @@ async fn handle_socket(
                     }
                 };
                 if binding.user_id != user {
+                    state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::NotAuthorized });
                     let rs = orbisync_protocol::v1::ResyncRequired {
                         reason_code: "history_unavailable".to_owned(),
                         current_revision: 0,
@@ -626,6 +629,7 @@ async fn handle_socket(
                 let inst = match state.world_store.get_instance(iid).await {
                     Ok(Some(v)) => v,
                     _ => {
+                        state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::HistoryUnavailable });
                         let rs = orbisync_protocol::v1::ResyncRequired {
                             reason_code: "history_unavailable".to_owned(),
                             current_revision: 0,
@@ -656,6 +660,7 @@ async fn handle_socket(
                 let world = match state.world_store.get_world(world_id).await {
                     Ok(Some(w)) => w,
                     _ => {
+                        state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::HistoryUnavailable });
                         let rs = orbisync_protocol::v1::ResyncRequired {
                             reason_code: "history_unavailable".to_owned(),
                             current_revision: 0,
@@ -697,6 +702,7 @@ async fn handle_socket(
                 )
                 .await
                 {
+                    state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::NotAuthorized });
                     tracing::warn!(
                         event = "realtime.resume_denied_by_scope",
                         instance_id = %iid,
@@ -722,7 +728,7 @@ async fn handle_socket(
                 ));
                 sink.begin_snapshot();
                 let registration = state.delivery.register_sink(iid, Arc::clone(&sink) as Arc<dyn DeliverySink>);
-                let Some(read) = state.registry.read_snapshot(iid).await else { return; };
+                let Some(read) = state.registry.read_snapshot(iid).await else { state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::HistoryUnavailable }); return; };
                 let (current_rev, oldest_retained) = (read.revision, Some(orbisync_domain::Revision::from_u64(read.reliable_floor.as_u64().saturating_add(1))));
                 let resume_read = Some(read.clone());
                 let window = HistoryWindow::new(current_rev, oldest_retained);
@@ -733,6 +739,12 @@ async fn handle_socket(
                 let resync = decide_resync(last_applied, window);
                 match resync {
                     orbisync_realtime::ResyncOutcome::ResyncRequired { reason, current } => {
+                        let metric_reason = match reason {
+                            orbisync_realtime::ResyncReason::Gap => orbisync_application::metrics::ResumeRejectReason::RevisionGap,
+                            orbisync_realtime::ResyncReason::FutureRevision => orbisync_application::metrics::ResumeRejectReason::FutureRevision,
+                            orbisync_realtime::ResyncReason::HistoryUnavailable => orbisync_application::metrics::ResumeRejectReason::HistoryUnavailable,
+                        };
+                        state.metrics_recorder.incr(Counter::ResumeRejected { reason: metric_reason });
                         let rs = orbisync_protocol::v1::ResyncRequired {
                             reason_code: reason.as_str().to_owned(),
                             current_revision: current.as_u64(),
@@ -773,8 +785,8 @@ async fn handle_socket(
                         // The publication lock fences in-flight old-socket work.
                         // Claim the next generation before releasing it; stale
                         // commands and stale socket cleanup then fail ownership.
-                        if !read.members.contains(&(binding.presence_id, user)) { return; }
-                        let Some((new_token, epoch)) = state.resume_store.rebind(&binding) else { return; };
+                        if !read.members.contains(&(binding.presence_id, user)) { state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::OwnershipLost }); return; }
+                        let Some((new_token, epoch)) = state.resume_store.rebind(&binding) else { state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::OwnershipLost }); return; };
                         sink.bind_presence(binding.presence_id, epoch);
                         presence_guard_inner = Some(PresenceGuard {
                             delivery: Arc::clone(&state.delivery),

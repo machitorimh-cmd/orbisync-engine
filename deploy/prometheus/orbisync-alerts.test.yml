@@ -1,0 +1,103 @@
+rule_files:
+  - orbisync-alerts.yml
+evaluation_interval: 30s
+tests:
+  - name: grace-is-normal-and-empty-server-does-not-stall
+    interval: 30s
+    input_series:
+      - series: 'presence_grace_waiting{job="orbisync",instance="test"}'
+        values: '7x30'
+      - series: 'presence_memberships_without_binding{job="orbisync",instance="test"}'
+        values: '0x30'
+      - series: 'presence_bindings_without_membership{job="orbisync",instance="test"}'
+        values: '0x30'
+      - series: 'presence_connection_ownership_mismatch{job="orbisync",instance="test"}'
+        values: '0x30'
+      - series: 'persistence_pending{job="orbisync",instance="test"}'
+        values: '0x30'
+      - series: 'persistence_oldest_pending_seconds{job="orbisync",instance="test"}'
+        values: '0x30'
+      - series: 'checkpoint_latest_timestamp_seconds{job="orbisync",instance="test"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: OrbiSyncPresenceDiscrepancy
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: OrbiSyncCheckpointStalled
+        exp_alerts: []
+  - name: retained-orphan-and-overlapping-socket-fire-after-five-minutes
+    interval: 30s
+    input_series:
+      - series: 'presence_memberships_without_binding{job="orbisync",instance="test"}'
+        values: '1x12'
+      - series: 'presence_bindings_without_membership{job="orbisync",instance="test"}'
+        values: '0x12'
+      - series: 'presence_connection_ownership_mismatch{job="orbisync",instance="test"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OrbiSyncPresenceDiscrepancy
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OrbiSyncPresenceDiscrepancy
+        exp_alerts:
+          - exp_labels: {job: orbisync, instance: test, severity: warning, component: realtime}
+            exp_annotations:
+              summary: Presence ownership and Membership disagree
+              description: Check lifecycle cleanup and Resume handoffs. Normal grace retention is excluded.
+  - name: old-accepted-work-with-no-checkpoint-fires
+    interval: 30s
+    input_series:
+      - series: 'persistence_pending{job="orbisync",instance="test"}'
+        values: '2x30'
+      - series: 'persistence_oldest_pending_seconds{job="orbisync",instance="test"}'
+        values: '0+30x30'
+      - series: 'checkpoint_latest_timestamp_seconds{job="orbisync",instance="test"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: OrbiSyncCheckpointStalled
+        exp_alerts:
+          - exp_labels: {job: orbisync, instance: test, severity: critical, component: persistence}
+            exp_annotations:
+              summary: Checkpoints are not advancing while persistence work remains
+              description: A process with no accepted pending work does not trigger this rule. Zero checkpoint timestamp means none has been observed.
+  - name: queue-pressure-and-dlq-growth-fire
+    interval: 30s
+    input_series:
+      - series: 'instance_command_queue_depth{job="orbisync",instance="test",queue="control"}'
+        values: '52x12'
+      - series: 'extension_dead_letters{job="orbisync",instance="test"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OrbiSyncQueuePressure
+        exp_alerts:
+          - exp_labels: {job: orbisync, instance: test, severity: warning, component: queues}
+            exp_annotations:
+              summary: A last-observed queue depth remains near capacity
+              description: Defaults assume control=64 and other queues=256. Adjust thresholds to configured capacities; samples are not global queue totals.
+      - eval_time: 5m
+        alertname: OrbiSyncExtensionDeadLettersGrowing
+        exp_alerts:
+          - exp_labels: {job: orbisync, instance: test, severity: warning, component: extensions}
+            exp_annotations:
+              summary: Extension Dead Letter count is growing
+              description: Inspect endpoint health and delivery errors. This is a retained-row gauge, so concurrent purges can mask growth.
+  - name: leave-retry-must-eventually-be-acknowledged
+    interval: 30s
+    input_series:
+      - series: 'presence_reclaim_waiting{job="orbisync",instance="test"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OrbiSyncPresenceReclaimStalled
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OrbiSyncPresenceReclaimStalled
+        exp_alerts:
+          - exp_labels: {job: orbisync, instance: test, severity: warning, component: realtime}
+            exp_annotations:
+              summary: Presence reclamation has not completed
+              description: Check control mailbox saturation and Leave acknowledgement. Grace waiting alone does not trigger this rule.

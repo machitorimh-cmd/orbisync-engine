@@ -25,11 +25,13 @@ pub mod audit;
 pub mod auth;
 pub mod diagnostics;
 mod extension_commands;
+pub mod external_keys;
 pub mod instance_membership;
 pub mod login_rate_limit;
 pub mod metrics;
 pub mod password;
 pub mod roles;
+pub mod sessions;
 pub mod ticket_rate_limit;
 pub mod users;
 pub mod worlds;
@@ -312,6 +314,11 @@ pub struct HttpState {
         Option<Arc<IdentityAdministrationService<DynIdentityAdministrationStore, DynClock>>>,
     identity_query: Option<Arc<dyn IdentityQueryPort>>,
     audit_query: Option<Arc<dyn AuditQueryPort>>,
+    session_management: Option<Arc<dyn orbisync_application::SessionManagementPort>>,
+    external_key_management: Option<(
+        Arc<orbisync_identity::JwtIdentityProvider>,
+        Arc<dyn orbisync_application::ExternalKeyAuditStore>,
+    )>,
     access_token_ttl_seconds: u64,
     refresh_token_ttl_seconds: u64,
     csv_max_bytes: usize,
@@ -431,6 +438,8 @@ impl HttpState {
             identity_admin: None,
             identity_query: None,
             audit_query: None,
+            session_management: None,
+            external_key_management: None,
             access_token_ttl_seconds,
             refresh_token_ttl_seconds,
             csv_max_bytes: DEFAULT_CSV_MAX_BYTES,
@@ -634,6 +643,46 @@ impl HttpState {
     #[must_use]
     pub fn audit_query(&self) -> Option<Arc<dyn AuditQueryPort>> {
         self.audit_query.clone()
+    }
+
+    /// Attaches audited session inventory and revocation.
+    #[must_use]
+    pub fn with_session_management(
+        mut self,
+        port: Arc<dyn orbisync_application::SessionManagementPort>,
+    ) -> Self {
+        self.session_management = Some(port);
+        self
+    }
+
+    /// Returns session administration when configured.
+    #[must_use]
+    pub fn session_management(
+        &self,
+    ) -> Option<Arc<dyn orbisync_application::SessionManagementPort>> {
+        self.session_management.clone()
+    }
+
+    /// Attaches the same external provider used by login and its durable audit.
+    #[must_use]
+    pub fn with_external_key_management(
+        mut self,
+        provider: Arc<orbisync_identity::JwtIdentityProvider>,
+        audit: Arc<dyn orbisync_application::ExternalKeyAuditStore>,
+    ) -> Self {
+        self.external_key_management = Some((provider, audit));
+        self
+    }
+
+    /// Returns local key administration; callers cannot select a file path.
+    #[must_use]
+    pub fn external_key_management(
+        &self,
+    ) -> Option<(
+        Arc<orbisync_identity::JwtIdentityProvider>,
+        Arc<dyn orbisync_application::ExternalKeyAuditStore>,
+    )> {
+        self.external_key_management.clone()
     }
 
     /// Configures the access-token TTL from `auth.access_token_ttl_seconds`.
@@ -1559,6 +1608,25 @@ pub fn router(state: HttpState) -> Router {
                 .delete(roles::delete_role),
         )
         .route("/v1/audit-events", get(audit::list_audit_events))
+        .route("/v1/audit-events/export", get(audit::export_audit_events))
+        .route("/v1/auth/external/keys/reload", post(external_keys::reload))
+        .route("/v1/auth/sessions", get(sessions::list_self))
+        .route(
+            "/v1/auth/sessions/revoke-others",
+            post(sessions::revoke_others),
+        )
+        .route(
+            "/v1/auth/sessions/{session_id}",
+            axum::routing::delete(sessions::revoke_one).patch(sessions::label_one),
+        )
+        .route(
+            "/v1/users/{user_id}/sessions",
+            get(sessions::admin_list).delete(sessions::admin_revoke_all),
+        )
+        .route(
+            "/v1/users/{user_id}/sessions/{session_id}",
+            axum::routing::delete(sessions::admin_revoke_one),
+        )
         .route("/v1/audit-events/{event_id}", get(audit::get_audit_event))
         .route(
             "/v1/admin/diagnostics",
@@ -1591,6 +1659,12 @@ pub fn router(state: HttpState) -> Router {
                     axum::http::header::IF_MATCH,
                     HeaderName::from_static("idempotency-key"),
                 ]))
+                .expose_headers([
+                    HeaderName::from_static("x-request-id"),
+                    HeaderName::from_static("x-next-cursor"),
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::header::CONTENT_DISPOSITION,
+                ])
                 .allow_credentials(state.allow_credentials()),
         )
     }

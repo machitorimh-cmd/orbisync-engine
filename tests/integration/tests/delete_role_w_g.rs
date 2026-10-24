@@ -564,6 +564,7 @@ async fn delete_role_audit_exists_after_success() {
         to: None,
         actor_id: None,
         action: Some("role.deleted".to_owned()),
+        ..Default::default()
     };
     let page = qstore
         .search(

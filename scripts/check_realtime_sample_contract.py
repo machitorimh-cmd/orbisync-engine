@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_WS_PATHS = {"/ws", "/v1/realtime/ws"}
 SAMPLE_WS_PATH = "/ws"
 CANONICAL_SUBPROTOCOL = "orbisync.v1.protobuf"
+_RUST_CHAR_LITERAL = re.compile(r"'(?:[^'\\\n]|\\(?:.|u\{[0-9a-fA-F_]+\}))'")
+_RUST_HASHED_LITERAL = re.compile(r'r(#+)"')
+_RUST_RAW_LITERAL = re.compile(r'r(#+)?"')
 
 _REQUIRED_FILES = (
     "crates/orbisync-server/src/main.rs",
@@ -86,7 +89,7 @@ def strip_rust_comments(source: str) -> str:
         # Skip over literals as code so a comment marker inside one is not
         # treated as a comment. Keep literal contents for route regexes.
         # A lifetime such as 'static is not a character literal.
-        is_char = source[i] == "'" and re.match(r"'(?:[^'\\\n]|\\(?:.|u\{[0-9a-fA-F_]+\}))'", source[i:])
+        is_char = source[i] == "'" and _RUST_CHAR_LITERAL.match(source, i)
         if source[i] == '"' or is_char:
             quote = source[i]
             i += 1
@@ -99,7 +102,7 @@ def strip_rust_comments(source: str) -> str:
                 else:
                     i += 1
             continue
-        raw = re.match(r"r(#+)\"", source[i:])
+        raw = _RUST_HASHED_LITERAL.match(source, i)
         if raw:
             hashes = raw.group(1)
             i += len(raw.group(0))
@@ -115,7 +118,7 @@ def _skip_rust_literal(source: str, start: int) -> int:
     """Return the first offset after a Rust string or raw string literal."""
 
     if source.startswith("r", start):
-        raw = re.match(r"r(#+)?\"", source[start:])
+        raw = _RUST_RAW_LITERAL.match(source, start)
         if raw:
             hashes = raw.group(1) or ""
             body_start = start + len(raw.group(0))
@@ -269,6 +272,16 @@ def strip_yaml_comments(text: str) -> str:
 _LEGACY_WS_PATH = re.compile(r"(?<!/v1)/realtime(?=(?:/|$|[\s`\"'(),.:;]))")
 
 
+def reference_uses_sdk_default(source: str) -> bool:
+    """Accept the SDK client itself or its captured alias, with default connect()."""
+    # Capturing the SDK client keeps async joins bound to the original server.
+    receivers = {"client"}
+    receivers.update(re.findall(r"\bconst\s+(\w+)\s*=\s*client\s*[,;]", source))
+    default_connect = any(re.search(r"\b" + re.escape(receiver) + r"\.connect\(\s*\)", source)
+                          for receiver in receivers)
+    return "new OrbiSyncClient" in source and default_connect
+
+
 def check_contract(root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     try:
@@ -313,7 +326,7 @@ def check_contract(root: Path = ROOT) -> list[str]:
             errors.append("sample contains obsolete WebSocket subprotocol")
         if _LEGACY_WS_PATH.search(source):
             errors.append("sample contains obsolete root WebSocket path /realtime")
-    if "new OrbiSyncClient" not in reference_source or "client.connect()" not in reference_source:
+    if not reference_uses_sdk_default(reference_source):
         errors.append("reference web must use the SDK default for WebSocket setup")
     if "orbisync.realtime.v1" in reference_source:
         errors.append("reference web sample contains obsolete WebSocket subprotocol")

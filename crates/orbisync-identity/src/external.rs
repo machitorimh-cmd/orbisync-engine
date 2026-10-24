@@ -11,8 +11,12 @@
 //! network-backed key source would add.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read as _;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
 
+use base64::Engine as _;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use orbisync_application::{
     ApplicationError, ApplicationErrorKind, ExternalAuthError, ExternalIdentity,
@@ -37,6 +41,8 @@ struct JwkEntry {
     alg: String,
     #[serde(default)]
     kty: String,
+    #[serde(default)]
+    crv: Option<String>,
     /// Ed25519 public key, base64url. Present for `OKP` keys.
     #[serde(default)]
     x: Option<String>,
@@ -62,7 +68,59 @@ pub struct JwtIdentityProvider {
     audience: String,
     expected_algorithm: Algorithm,
     leeway_seconds: u64,
+    path: PathBuf,
+    keys: RwLock<Arc<ActiveKeys>>,
+    reload_gate: Mutex<()>,
+}
+
+struct ActiveKeys {
+    generation: u64,
     keys: HashMap<String, VerificationKey>,
+}
+
+fn load_keys(
+    path: &std::path::Path,
+    expected_algorithm: Algorithm,
+) -> Result<HashMap<String, VerificationKey>, ApplicationError> {
+    const MAX_BYTES: u64 = 262_144;
+    let file = std::fs::File::open(path)
+        .map_err(|_| config_error("identity provider key file could not be read"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| config_error("identity provider key file could not be read"))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(config_error("identity provider key file exceeds 256 KiB"));
+    }
+    let set: JwkSet = serde_json::from_slice(&bytes)
+        .map_err(|_| config_error("identity provider key file is invalid JSON"))?;
+    if set.keys.is_empty() || set.keys.len() > 64 {
+        return Err(config_error(
+            "identity provider must have between one and 64 keys",
+        ));
+    }
+    let mut keys = HashMap::new();
+    for entry in set.keys {
+        if entry.kid.is_empty() || entry.kid.len() > 128 || entry.kid.chars().any(char::is_control)
+        {
+            return Err(config_error("identity provider key identifier is invalid"));
+        }
+        let algorithm = parse_algorithm(&entry.alg)
+            .ok_or_else(|| config_error("identity provider key algorithm is unsupported"))?;
+        if algorithm != expected_algorithm {
+            return Err(config_error(
+                "identity provider key algorithm differs from configuration",
+            ));
+        }
+        let key = decoding_key(&entry, algorithm)?;
+        if keys
+            .insert(entry.kid, VerificationKey { key, algorithm })
+            .is_some()
+        {
+            return Err(config_error("duplicate identity provider key identifier"));
+        }
+    }
+    Ok(keys)
 }
 
 impl JwtIdentityProvider {
@@ -90,57 +148,18 @@ impl JwtIdentityProvider {
         let expected_algorithm = parse_algorithm(algorithm).ok_or_else(|| {
             config_error(format!("`{algorithm}` is not an accepted token algorithm"))
         })?;
-        let bytes = std::fs::read(path).map_err(|error| {
-            config_error(format!(
-                "identity provider key file `{}` could not be read: {error}",
-                path.display()
-            ))
-        })?;
-        let set: JwkSet = serde_json::from_slice(&bytes).map_err(|error| {
-            config_error(format!(
-                "identity provider key file is invalid JSON: {error}"
-            ))
-        })?;
-
-        let mut keys = HashMap::new();
-        for entry in set.keys {
-            let entry_algorithm = parse_algorithm(&entry.alg).ok_or_else(|| {
-                config_error(format!(
-                    "key `{}` names unsupported alg `{}`",
-                    entry.kid, entry.alg
-                ))
-            })?;
-            if entry_algorithm != expected_algorithm {
-                return Err(config_error(format!(
-                    "key `{}` is published for {} but the server accepts {algorithm}",
-                    entry.kid, entry.alg
-                )));
-            }
-            let key = decoding_key(&entry, entry_algorithm)?;
-            if keys
-                .insert(
-                    entry.kid.clone(),
-                    VerificationKey {
-                        key,
-                        algorithm: entry_algorithm,
-                    },
-                )
-                .is_some()
-            {
-                return Err(config_error(format!("duplicate key id `{}`", entry.kid)));
-            }
-        }
-        if keys.is_empty() {
-            return Err(config_error(
-                "identity provider key file contains no usable key",
-            ));
-        }
+        let keys = load_keys(path, expected_algorithm)?;
         Ok(Self {
             issuer,
             audience,
             expected_algorithm,
             leeway_seconds,
-            keys,
+            path: path.to_path_buf(),
+            keys: RwLock::new(Arc::new(ActiveKeys {
+                generation: 1,
+                keys,
+            })),
+            reload_gate: Mutex::new(()),
         })
     }
 
@@ -149,6 +168,74 @@ impl JwtIdentityProvider {
     #[must_use]
     pub fn issuer(&self) -> &str {
         &self.issuer
+    }
+
+    /// Validates the configured local file, audits the attempt and atomically
+    /// publishes it. Requests cannot select a path or change issuer/audience.
+    /// Include old and new public keys in the file for an overlap period;
+    /// removing a key stops subsequent authentications using that key.
+    /// Already issued OrbiSync sessions retain their ordinary expiry/revocation.
+    pub async fn reload_keys(
+        &self,
+        audit: &dyn orbisync_application::ExternalKeyAuditStore,
+        actor_id: UserId,
+        request_id: RequestId,
+        now: Timestamp,
+    ) -> Result<orbisync_application::ExternalKeyReloadSummary, ApplicationError> {
+        let _gate = self.reload_gate.lock().await;
+        let path = self.path.clone();
+        let algorithm = self.expected_algorithm;
+        let loaded = tokio::task::spawn_blocking(move || load_keys(&path, algorithm))
+            .await
+            .map_err(|_| config_error("identity provider key loading failed"))?;
+        let active = Arc::clone(&*self.keys.read().await);
+        let candidate = match loaded {
+            Ok(keys) => keys,
+            Err(_) => {
+                audit
+                    .record_reload(orbisync_application::ExternalKeyReloadAudit {
+                        actor_id,
+                        request_id,
+                        occurred_at: now,
+                        succeeded: false,
+                        generation: active.generation,
+                        key_count: active.keys.len(),
+                    })
+                    .await
+                    .map_err(|_| config_error("key reload audit unavailable"))?;
+                return Err(ApplicationError::new(
+                    ApplicationErrorKind::DomainRule,
+                    "configured external key file is invalid",
+                ));
+            }
+        };
+        let generation = active
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| config_error("key generation exhausted"))?;
+        let mut key_ids: Vec<_> = candidate.keys().cloned().collect();
+        key_ids.sort();
+        let summary = orbisync_application::ExternalKeyReloadSummary {
+            generation,
+            key_count: candidate.len(),
+            key_ids,
+        };
+        audit
+            .record_reload(orbisync_application::ExternalKeyReloadAudit {
+                actor_id,
+                request_id,
+                occurred_at: now,
+                succeeded: true,
+                generation,
+                key_count: candidate.len(),
+            })
+            .await
+            .map_err(|_| config_error("key reload audit unavailable"))?;
+        *self.keys.write().await = Arc::new(ActiveKeys {
+            generation,
+            keys: candidate,
+        });
+        Ok(summary)
     }
 }
 
@@ -170,12 +257,16 @@ impl core::fmt::Debug for JwtIdentityProvider {
             .field("issuer", &self.issuer)
             .field("audience", &self.audience)
             .field("algorithm", &self.expected_algorithm)
-            .field("key_count", &self.keys.len())
+            .field(
+                "key_count",
+                &self.keys.try_read().ok().map(|keys| keys.keys.len()),
+            )
             .finish()
     }
 }
 
 fn decoding_key(entry: &JwkEntry, algorithm: Algorithm) -> Result<DecodingKey, ApplicationError> {
+    validate_key_material(entry, algorithm)?;
     // A key whose declared type does not match its algorithm is a
     // misconfiguration; loading it anyway would mean verifying against a key
     // the issuer published for a different purpose.
@@ -229,6 +320,74 @@ fn decoding_key(entry: &JwkEntry, algorithm: Algorithm) -> Result<DecodingKey, A
     }
 }
 
+fn validate_key_material(entry: &JwkEntry, algorithm: Algorithm) -> Result<(), ApplicationError> {
+    let invalid = || config_error("identity provider public key material is invalid");
+    let component = |value: &Option<String>| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value.as_deref().ok_or_else(invalid)?)
+            .map_err(|_| invalid())
+    };
+    match algorithm {
+        Algorithm::EdDSA => {
+            if entry.crv.as_deref().is_some_and(|curve| curve != "Ed25519") {
+                return Err(invalid());
+            }
+            let bytes: [u8; 32] = component(&entry.x)?.try_into().map_err(|_| invalid())?;
+            let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes).map_err(|_| invalid())?;
+            if key.is_weak() {
+                return Err(invalid());
+            }
+        }
+        Algorithm::ES256 => {
+            if entry.crv.as_deref().is_some_and(|curve| curve != "P-256") {
+                return Err(invalid());
+            }
+            let x = component(&entry.x)?;
+            let y = component(&entry.y)?;
+            if x.len() != 32 || y.len() != 32 {
+                return Err(invalid());
+            }
+            let mut point = Vec::with_capacity(65);
+            point.push(4);
+            point.extend(x);
+            point.extend(y);
+            aws_lc_rs::signature::ParsedPublicKey::new(
+                &aws_lc_rs::signature::ECDSA_P256_SHA256_FIXED,
+                &point,
+            )
+            .map_err(|_| invalid())?;
+        }
+        Algorithm::RS256 => {
+            let n = component(&entry.n)?;
+            let e = component(&entry.e)?;
+            if n.is_empty()
+                || n.len() > 1024
+                || n[0] == 0
+                || e.is_empty()
+                || e.len() > 4
+                || e[0] == 0
+                || n.last().is_none_or(|b| b & 1 == 0)
+                || e.last().is_none_or(|b| b & 1 == 0)
+            {
+                return Err(invalid());
+            }
+            let bits = n.len() * 8 - n[0].leading_zeros() as usize;
+            let exponent = e
+                .iter()
+                .fold(0_u32, |value, byte| (value << 8) | u32::from(*byte));
+            if !(2048..=8192).contains(&bits) || exponent < 3 {
+                return Err(invalid());
+            }
+            use aws_lc_rs::encoding::{AsDer as _, PublicKeyX509Der};
+            let components = aws_lc_rs::rsa::PublicKeyComponents { n: &n, e: &e };
+            let der: PublicKeyX509Der<'static> = components.as_der().map_err(|_| invalid())?;
+            aws_lc_rs::rsa::PublicKey::from_der(der.as_ref()).map_err(|_| invalid())?;
+        }
+        _ => return Err(invalid()),
+    }
+    Ok(())
+}
+
 /// Parses an accepted algorithm name.
 ///
 /// `none` is absent by construction, together with every symmetric algorithm:
@@ -268,7 +427,11 @@ impl IdentityProvider for JwtIdentityProvider {
         let header =
             jsonwebtoken::decode_header(token).map_err(|_| ExternalAuthError::Malformed)?;
         let key_id = header.kid.as_deref().ok_or(ExternalAuthError::UnknownKey)?;
-        let verification = self.keys.get(key_id).ok_or(ExternalAuthError::UnknownKey)?;
+        let snapshot = Arc::clone(&*self.keys.read().await);
+        let verification = snapshot
+            .keys
+            .get(key_id)
+            .ok_or(ExternalAuthError::UnknownKey)?;
         // The token's algorithm must equal the one its key was published for.
         // Checking the header before handing the token to the decoder makes an
         // algorithm substitution fail here rather than depending on the

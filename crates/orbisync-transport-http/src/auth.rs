@@ -125,6 +125,28 @@ fn login_rate_limited_response(request_id: String, retry_after_seconds: u64) -> 
     response
 }
 
+fn admit_issuance(
+    state: &HttpState,
+    method: orbisync_domain::AuthMethod,
+    source_ip: Option<&str>,
+    request_id: &str,
+) -> Result<tokio::sync::OwnedSemaphorePermit, Box<Response>> {
+    state
+        .login_rate_limiter()
+        .acquire_issuance(
+            method,
+            source_ip.and_then(|ip| ip.parse().ok()),
+            state.now().as_offset_date_time(),
+        )
+        .map_err(|rejection| {
+            crate::metrics::record_rate_limit_rejected(state, rejection.scope);
+            Box::new(login_rate_limited_response(
+                request_id.to_owned(),
+                rejection.retry_after_seconds,
+            ))
+        })
+}
+
 /// `POST /v1/auth/login`.
 ///
 /// All business orchestration is delegated to `LoginService` (P2-C4, `orbisync-identity`).
@@ -164,6 +186,15 @@ pub async fn login(
         );
         return login_rate_limited_response(request_id, decision.retry_after_seconds.unwrap_or(1));
     }
+    let _admission = match admit_issuance(
+        &state,
+        orbisync_domain::AuthMethod::Local,
+        source_ip.as_deref(),
+        &request_id,
+    ) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
 
     let Some(service) = state.login_service() else {
         return error_response(
@@ -216,11 +247,7 @@ pub async fn login(
                         &state,
                         orbisync_application::metrics::RateLimitScope::PasswordHash,
                     );
-                    error_response(
-                        ErrorCode::RateLimited,
-                        "rate limited".to_owned(),
-                        request_id,
-                    )
+                    login_rate_limited_response(request_id, 1)
                 }
                 _ => {
                     tracing::warn!(
@@ -716,11 +743,7 @@ fn issue_error_response(
                 request_id,
             )
         }
-        ApplicationErrorKind::RateLimited => error_response(
-            ErrorCode::RateLimited,
-            "rate limited".to_owned(),
-            request_id,
-        ),
+        ApplicationErrorKind::RateLimited => login_rate_limited_response(request_id, 1),
         _ => {
             tracing::warn!(
                 event = "auth.subject_issue_failed",
@@ -827,6 +850,15 @@ pub async fn guest(
         Ok(value) => value,
         Err(response) => return *response,
     };
+    let _admission = match admit_issuance(
+        &state,
+        orbisync_domain::AuthMethod::Guest,
+        source_ip.as_deref(),
+        &request_id,
+    ) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
     match service.issue_guest(req_id, source_ip).await {
         Ok(result) => login_response(result),
         Err(error) => issue_error_response(&state, &error, request_id),
@@ -851,6 +883,15 @@ pub async fn name_only(
     };
     let (source_ip, req_id) = match issue_context(&state, &headers, connect_info, &request_id) {
         Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let _admission = match admit_issuance(
+        &state,
+        orbisync_domain::AuthMethod::NameOnly,
+        source_ip.as_deref(),
+        &request_id,
+    ) {
+        Ok(permit) => permit,
         Err(response) => return *response,
     };
     match service
@@ -880,6 +921,15 @@ pub async fn external(
     };
     let (source_ip, req_id) = match issue_context(&state, &headers, connect_info, &request_id) {
         Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let _admission = match admit_issuance(
+        &state,
+        orbisync_domain::AuthMethod::External,
+        source_ip.as_deref(),
+        &request_id,
+    ) {
+        Ok(permit) => permit,
         Err(response) => return *response,
     };
     match service.authenticate(&body.token, req_id, source_ip).await {
@@ -2309,6 +2359,155 @@ mod auth_method_tests {
             2_592_000,
             b"test-refresh-hmac-key".to_vec(),
         )
+    }
+
+    #[tokio::test]
+    async fn issuance_guest_flood_is_bounded_before_subject_or_session_insertion() {
+        use crate::login_rate_limit::{AuthIssuanceLimits, LoginRateLimiter};
+        let store = Arc::new(FakeIdentityStore::new());
+        let (state, _) = state_with_methods(store.clone());
+        let state = state.with_login_rate_limiter(Arc::new(
+            LoginRateLimiter::new(100, 300, 10).with_issuance_limits(AuthIssuanceLimits {
+                per_ip_per_minute: 2,
+                per_method_per_minute: [2, 1, 2, 2],
+                max_concurrent: 2,
+                temporary_subjects_per_minute: 100,
+            }),
+        ));
+        for (peer, xff, expected) in [
+            (1, "203.0.113.1", 200),
+            (1, "203.0.113.2", 429),
+            (1, "203.0.113.3", 429),
+            (2, "203.0.113.1", 200),
+        ] {
+            let mut request = Request::builder()
+                .uri("/v1/auth/guest")
+                .method("POST")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", xff)
+                .body(Body::from("{}"))
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                std::net::SocketAddr::from(([192, 0, 2, peer], 443)),
+            ));
+            let response = router(state.clone()).oneshot(request).await.unwrap();
+            assert_eq!(response.status().as_u16(), expected);
+            if expected == 429 {
+                assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+            }
+        }
+        assert_eq!(
+            store.issued_subject_count(),
+            2,
+            "rejected attempts must allocate no durable subjects"
+        );
+        assert_eq!(store.sessions_snapshot().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn issuance_shared_concurrency_gate_covers_all_four_http_handlers() {
+        use crate::login_rate_limit::{AuthIssuanceLimits, LoginRateLimiter};
+        use orbisync_application::{ApplicationError, ExternalAuthError, ExternalIdentity};
+        struct UnreachableExternal;
+        #[derive(Default)]
+        struct AdmissionMetrics(std::sync::atomic::AtomicUsize);
+        impl orbisync_application::metrics::MetricsRecorder for AdmissionMetrics {
+            fn incr(&self, counter: orbisync_application::metrics::Counter) {
+                if matches!(
+                    counter,
+                    orbisync_application::metrics::Counter::RateLimitRejected {
+                        scope: orbisync_application::metrics::RateLimitScope::AuthConcurrency
+                    }
+                ) {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            fn add(&self, _: orbisync_application::metrics::Counter, _: u64) {}
+            fn set(&self, _: orbisync_application::metrics::Gauge, _: i64) {}
+            fn observe(&self, _: orbisync_application::metrics::Histogram, _: f64) {}
+        }
+        #[async_trait::async_trait]
+        impl orbisync_application::IdentityProvider for UnreachableExternal {
+            async fn verify(
+                &self,
+                _: &str,
+                _: Timestamp,
+            ) -> Result<ExternalIdentity, ExternalAuthError> {
+                panic!("admission must run before provider verification");
+            }
+        }
+        #[async_trait::async_trait]
+        impl orbisync_application::ExternalIdentityStore for UnreachableExternal {
+            async fn find_user(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<orbisync_domain::UserId>, ApplicationError> {
+                panic!("admission must run before database lookup");
+            }
+        }
+        let store = Arc::new(FakeIdentityStore::new());
+        let metrics = Arc::new(AdmissionMetrics::default());
+        let (state, _) = state_with_methods(store.clone());
+        let issuer = Arc::new(SessionIssuer::new(
+            store.clone(),
+            token_service(),
+            state.clock().clone(),
+            b"test-refresh-key".to_vec(),
+            900,
+            2592000,
+        ));
+        let state = state
+            .with_external_auth_service(Arc::new(orbisync_identity::ExternalAuthService::new(
+                Arc::new(UnreachableExternal),
+                Arc::new(UnreachableExternal),
+                issuer,
+                vec![],
+            )))
+            .with_enabled_auth_methods(vec![
+                AuthMethod::Local,
+                AuthMethod::Guest,
+                AuthMethod::NameOnly,
+                AuthMethod::External,
+            ])
+            .with_login_rate_limiter(Arc::new(
+                LoginRateLimiter::new(100, 300, 10).with_issuance_limits(AuthIssuanceLimits {
+                    max_concurrent: 1,
+                    ..Default::default()
+                }),
+            ))
+            .with_metrics_recorder(metrics.clone());
+        let permit = state
+            .login_rate_limiter()
+            .acquire_issuance(AuthMethod::Local, None, state.now().as_offset_date_time())
+            .unwrap();
+        for (path, body) in [
+            (
+                "/v1/auth/login",
+                r#"{"login_id":"test","password":"secret"}"#,
+            ),
+            ("/v1/auth/guest", "{}"),
+            ("/v1/auth/name", r#"{"display_name":"Visitor"}"#),
+            ("/v1/auth/external", r#"{"token":"invalid"}"#),
+        ] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .method("POST")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
+            assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        }
+        assert_eq!(store.issued_subject_count(), 0);
+        assert_eq!(metrics.0.load(std::sync::atomic::Ordering::Relaxed), 4);
+        drop(permit);
+        assert_eq!(post(&state, "/v1/auth/guest", "{}").await.0, StatusCode::OK);
     }
 
     async fn post(state: &HttpState, path: &str, body: &str) -> (StatusCode, serde_json::Value) {

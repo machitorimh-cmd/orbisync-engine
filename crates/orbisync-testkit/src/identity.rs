@@ -1793,6 +1793,21 @@ impl AuditQueryPort for FakeIdentityStore {
                 {
                     return false;
                 }
+                if filter
+                    .resource_type
+                    .as_ref()
+                    .is_some_and(|value| value != &v.resource_type)
+                    || filter
+                        .resource_id
+                        .as_ref()
+                        .is_some_and(|value| Some(value) != v.resource_id.as_ref())
+                    || filter
+                        .request_id
+                        .as_ref()
+                        .is_some_and(|value| value != &v.request_id)
+                {
+                    return false;
+                }
                 true
             })
             .collect();
@@ -1806,34 +1821,18 @@ impl AuditQueryPort for FakeIdentityStore {
         let start = if let Some(after) = page.after {
             if after.0.contains('.') {
                 // Opaque cursor: decode and verify filter hash
-                let from_millis = filter.from.map(|t| {
-                    t.as_offset_date_time().unix_timestamp() * 1000
-                        + i64::from(t.as_offset_date_time().millisecond())
-                });
-                let to_millis = filter.to.map(|t| {
-                    t.as_offset_date_time().unix_timestamp() * 1000
-                        + i64::from(t.as_offset_date_time().millisecond())
-                });
-                let actor = filter.actor_id.map(|id| id.to_string());
-                let fh = self.codec.audit_filter_hash(
-                    from_millis,
-                    to_millis,
-                    actor.as_deref(),
-                    filter.action.as_deref(),
-                );
+                let fh = self.codec.audit_filter_binding(&filter);
                 let (ts_millis, id_str) = self
                     .codec
-                    .decode_audit(&after.0, &fh)
+                    .decode_audit_precise(&after.0, &fh)
                     .map_err(|_| IdentityPortError::InvalidRequest)?;
-                let ts = Timestamp::from_unix_millis(ts_millis)
-                    .map_err(|_| IdentityPortError::InvalidRequest)?;
-                let pos = filtered
-                    .iter()
-                    .position(|v| v.occurred_at == ts && v.id == id_str);
-                match pos {
-                    Some(idx) => idx + 1,
-                    None => return Err(IdentityPortError::InvalidRequest),
-                }
+                let nanos = i128::from(ts_millis) * 1_000;
+                filtered.partition_point(|v| {
+                    (
+                        v.occurred_at.as_offset_date_time().unix_timestamp_nanos(),
+                        v.id.as_str(),
+                    ) >= (nanos, id_str.as_str())
+                })
             } else {
                 // Legacy plain UUID (for users/roles tests) – treat as InvalidRequest for audit to force opaque
                 return Err(IdentityPortError::InvalidRequest);
@@ -1846,26 +1845,17 @@ impl AuditQueryPort for FakeIdentityStore {
         let next = if end < filtered.len() {
             match items.last() {
                 Some(last) => {
-                    let ts_millis = last.occurred_at.as_offset_date_time().unix_timestamp() * 1000
-                        + i64::from(last.occurred_at.as_offset_date_time().millisecond());
-                    let from_millis = filter.from.map(|t| {
-                        t.as_offset_date_time().unix_timestamp() * 1000
-                            + i64::from(t.as_offset_date_time().millisecond())
-                    });
-                    let to_millis = filter.to.map(|t| {
-                        t.as_offset_date_time().unix_timestamp() * 1000
-                            + i64::from(t.as_offset_date_time().millisecond())
-                    });
-                    let actor = filter.actor_id.map(|id| id.to_string());
-                    let fh = self.codec.audit_filter_hash(
-                        from_millis,
-                        to_millis,
-                        actor.as_deref(),
-                        filter.action.as_deref(),
-                    );
+                    let ts_millis = i64::try_from(
+                        last.occurred_at
+                            .as_offset_date_time()
+                            .unix_timestamp_nanos()
+                            / 1_000,
+                    )
+                    .map_err(|_| IdentityPortError::DataCorruption)?;
+                    let fh = self.codec.audit_filter_binding(&filter);
                     let cursor = self
                         .codec
-                        .encode_audit(ts_millis, &last.id, &fh)
+                        .encode_audit_precise(ts_millis, &last.id, &fh)
                         .map_err(|_| IdentityPortError::DataCorruption)?;
                     Some(QueryCursor(cursor))
                 }

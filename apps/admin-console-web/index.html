@@ -19,7 +19,7 @@
         </div>
         <nav aria-label="管理画面ナビゲーション">
           <a href="#overview">概要</a><a href="#users">ユーザー</a><a href="#roles">ロール</a>
-          <a href="#worlds">World</a><a href="#instances">Instance</a><a href="#audit">監査ログ</a>
+          <a href="#worlds">World</a><a href="#instances">Instance</a><a href="#audit">監査ログ</a><a href="#sessions">セッション</a><a href="#diagnostics">運用診断</a>
         </nav>
         <div class="sidebar-session">
           <span class="eyebrow">SESSION</span><strong id="sessionUser">未ログイン</strong>
@@ -132,11 +132,38 @@
             </div>
             <div class="filter-row">
               <label><span>action完全一致</span><input id="auditActionFilter" placeholder="user.created" /></label>
+              <label><span>開始日時</span><input id="auditFromFilter" type="datetime-local" /></label>
+              <label><span>終了日時</span><input id="auditToFilter" type="datetime-local" /></label>
+              <label><span>Actor ID</span><input id="auditActorFilter" /></label>
+              <label><span>Resource type</span><input id="auditResourceTypeFilter" /></label>
+              <label><span>Resource ID</span><input id="auditResourceIdFilter" /></label>
+              <label><span>Request ID</span><input id="auditRequestFilter" /></label>
               <button id="applyAuditFilterBtn" class="button secondary" type="button">絞り込む</button>
+              <button id="exportAuditJsonBtn" class="button secondary" type="button" disabled>取得ページをJSON出力</button>
+              <button id="exportAuditCsvBtn" class="button secondary" type="button" disabled>取得ページをCSV出力</button>
             </div>
             <div class="table-wrap"><table><thead><tr><th>日時</th><th>結果</th><th>Action</th><th>Actor</th><th>Resource</th><th>Request ID</th></tr></thead><tbody id="auditTbody"></tbody></table></div>
             <div class="table-footer"><span id="auditCount">0 events</span><button id="nextAuditBtn" class="button secondary" type="button" hidden>さらに読み込む</button></div>
           </section>
+          <section id="sessions" class="panel">
+            <div class="section-heading"><div><h2>セッションと端末</h2><p>端末名は自分用の表示名です。失効後はRESTと既存接続の利用が停止します。</p></div></div>
+            <div class="filter-row">
+              <button id="selfSessionsBtn" class="button secondary" type="button">自分のセッション</button>
+              <button id="revokeOtherSessionsBtn" class="button danger-ghost" type="button">現在以外を失効</button>
+              <label><span>管理対象ユーザーID</span><input id="sessionTargetUser" /></label>
+              <button id="adminSessionsBtn" class="button secondary" type="button">対象ユーザーを表示</button>
+              <button id="revokeAllUserSessionsBtn" class="button danger-ghost" type="button">対象ユーザーの全セッションを失効</button>
+            </div>
+            <p id="sessionsStatus" aria-live="polite">一覧を取得してください。</p>
+            <div class="table-wrap"><table><thead><tr><th>セッションID</th><th>端末名</th><th>状態</th><th>作成</th><th>期限</th><th>操作</th></tr></thead><tbody id="sessionsTbody"></tbody></table></div>
+            <button id="nextSessionsBtn" class="button secondary" type="button" hidden>さらに読み込む</button>
+          </section>
+          <section id="externalKeys" class="panel">
+            <div class="section-heading"><div><h2>外部認証の鍵更新</h2><p>設定済みのローカルJWKSを検証して切り替えます。重複期間は旧鍵と新鍵を同じファイルに含めてください。発行済みのセッションは通常の期限・失効ルールに従います。</p></div></div>
+            <button id="reloadExternalKeysBtn" class="button secondary" type="button">設定済みの署名鍵を再読み込み</button>
+            <p id="externalKeysStatus" aria-live="polite">鍵ファイルのパスや鍵本体は表示しません。</p>
+          </section>
+          <section id="diagnostics" class="panel"></section>
         </div>
 
         <section class="panel activity-panel">

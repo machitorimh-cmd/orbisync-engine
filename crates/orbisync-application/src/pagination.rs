@@ -286,6 +286,60 @@ impl CursorCodec {
 
     /// Computes a stable filter binding for audit cursors.
     #[must_use]
+    pub fn audit_filter_binding(&self, filter: &crate::AuditFilter) -> String {
+        // JSON preserves field boundaries; nanoseconds distinguish all accepted
+        // timestamp filters, including two filters within the same millisecond.
+        let canonical = serde_json::json!([
+            filter
+                .from
+                .map(|t| t.as_offset_date_time().unix_timestamp_nanos().to_string()),
+            filter
+                .to
+                .map(|t| t.as_offset_date_time().unix_timestamp_nanos().to_string()),
+            filter.actor_id.map(|id| id.to_string()),
+            filter.action,
+            filter.resource_type,
+            filter.resource_id,
+            filter.request_id,
+        ]);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(canonical.to_string()))
+    }
+
+    /// Encodes an audit key at PostgreSQL's microsecond precision.
+    pub fn encode_audit_precise(
+        &self,
+        micros: i64,
+        id: &str,
+        filter: &str,
+    ) -> Result<String, CursorError> {
+        self.encode_payload(&CursorPayload {
+            v: CURSOR_VERSION,
+            k: "audit_v2".to_owned(),
+            id: Some(id.to_owned()),
+            ts: Some(micros),
+            fh: Some(filter.to_owned()),
+        })
+    }
+
+    /// Decodes a precise audit key and verifies every search filter.
+    pub fn decode_audit_precise(
+        &self,
+        cursor: &str,
+        filter: &str,
+    ) -> Result<(i64, String), CursorError> {
+        let payload = self.decode_payload(cursor)?;
+        if payload.k != "audit_v2" || payload.fh.as_deref() != Some(filter) {
+            return Err(CursorError::Invalid);
+        }
+        Ok((
+            payload.ts.ok_or(CursorError::Invalid)?,
+            payload.id.ok_or(CursorError::Invalid)?,
+        ))
+    }
+
+    /// Computes the legacy filter binding retained for protocol vectors.
+    #[must_use]
     pub fn audit_filter_hash(
         &self,
         from: Option<i64>,

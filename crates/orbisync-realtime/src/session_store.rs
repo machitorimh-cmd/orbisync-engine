@@ -71,6 +71,21 @@ struct SessionEntries {
     retiring: HashSet<PresenceId>,
 }
 
+/// Count-only lifecycle view. Tokens and identifiers never leave this API.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PresenceOwnershipSnapshot {
+    /// Connected owner generations, independent of token TTL.
+    pub connected: u64,
+    /// Disconnected owners inside the normal grace window.
+    pub grace_waiting: u64,
+    /// Expired/evicted owners awaiting acknowledged cleanup.
+    pub reclaim_waiting: u64,
+    /// Owned presences whose actor membership still exists.
+    pub bound_memberships: u64,
+    /// Owned presences with no actor membership.
+    pub bindings_without_membership: u64,
+}
+
 impl core::fmt::Debug for ResumeSessionStore {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ResumeSessionStore")
@@ -85,6 +100,48 @@ impl core::fmt::Debug for ResumeSessionStore {
 }
 
 impl ResumeSessionStore {
+    /// Samples lifecycle ownership, then checks runtime membership outside the
+    /// store lock. Concurrent Join/Resume/Leave can transiently skew the sample;
+    /// consumers should alert only on sustained discrepancies.
+    #[must_use]
+    pub fn ownership_snapshot(
+        &self,
+        mut is_member: impl FnMut(InstanceId, PresenceId) -> bool,
+    ) -> PresenceOwnershipSnapshot {
+        let now = self.clock.now();
+        let owners: Vec<_> = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .presences
+                .values()
+                .map(|binding| {
+                    (
+                        binding.instance_id,
+                        binding.presence_id,
+                        binding.disconnected,
+                        guard.retiring.contains(&binding.presence_id)
+                            || is_expired(binding.expires_at, now),
+                    )
+                })
+                .collect()
+        };
+        let mut result = PresenceOwnershipSnapshot::default();
+        for (instance, presence, disconnected, reclaim) in owners {
+            if !disconnected {
+                result.connected += 1;
+            } else if reclaim {
+                result.reclaim_waiting += 1;
+            } else {
+                result.grace_waiting += 1;
+            }
+            if is_member(instance, presence) {
+                result.bound_memberships += 1;
+            } else {
+                result.bindings_without_membership += 1;
+            }
+        }
+        result
+    }
     /// Creates a store with `grace_seconds` TTL (typically
     /// `world.resume_grace_seconds`, 60 s).
     #[must_use]
@@ -414,6 +471,44 @@ mod tests {
 
     fn ts(millis: i64) -> Timestamp {
         Timestamp::from_unix_millis(millis).expect("valid")
+    }
+
+    #[test]
+    fn diagnostics_distinguish_connected_grace_reclaim_and_missing_memberships() {
+        let clock = Arc::new(FixedClock::new(ts(1_000)));
+        let store = ResumeSessionStore::new(clock.clone(), 60);
+        let presence = PresenceId::generate();
+        let instance = InstanceId::generate();
+        store.issue(UserId::generate(), instance, presence, 0, Revision::INITIAL);
+        clock.advance_millis(61_000);
+        store.prune_expired();
+        let connected = store.ownership_snapshot(|_, _| true);
+        assert_eq!(
+            (
+                connected.connected,
+                connected.grace_waiting,
+                connected.reclaim_waiting
+            ),
+            (1, 0, 0)
+        );
+        store.mark_disconnected_epoch(presence, 0);
+        let grace = store.ownership_snapshot(|_, _| true);
+        assert_eq!(
+            (grace.connected, grace.grace_waiting, grace.reclaim_waiting),
+            (0, 1, 0)
+        );
+        assert_eq!(grace.bound_memberships, 1);
+        store.evict_oldest_for_instance(instance);
+        let reclaim = store.ownership_snapshot(|_, _| false);
+        assert_eq!(
+            (reclaim.reclaim_waiting, reclaim.bindings_without_membership),
+            (1, 1)
+        );
+        store.complete_cleanup(presence, 0);
+        assert_eq!(
+            store.ownership_snapshot(|_, _| false),
+            super::PresenceOwnershipSnapshot::default()
+        );
     }
 
     #[test]

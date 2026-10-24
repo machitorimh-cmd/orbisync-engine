@@ -16,6 +16,8 @@ export { SyncError, STATE_SYNC_FEATURE };
 export type { InstanceState, SyncedEntity, StateValue, StateObject } from "./sync_state.js";
 export type { ReadyOptions, SyncOptions, SyncStatus };
 import { uuidv7 } from "./uuidv7.js";
+import { ConfirmedEntityCommands, type EntityCommandOptions } from "./confirmed_commands.js";
+export * from "./confirmed_commands.js";
 export { uuidv7 } from "./uuidv7.js";
 export { PredictedInput, RemoteInterpolator } from "./motion.js";
 import {
@@ -553,6 +555,7 @@ export type InputOptions = {
 };
 
 export class OrbiSyncInstance {
+  readonly commands = new ConfirmedEntityCommands(this);
   private pendingInputs = new Map<string, { settle: (result: InputResult) => void }>();
   private handlers = new Map<string, Set<InstanceHandler<unknown>>>();
   /** Last known revision per entity, stored as bigint (wire type). */
@@ -589,6 +592,7 @@ export class OrbiSyncInstance {
     }
     this.entityRevisions.clear();
     this.sync?.stop(error, status);
+    this.commands._stop(status === "closed", error.code);
     if (status === "closed" || status === "failed") this.handlers.clear();
   }
   _syncFailure(error: unknown): void { this.sync?.fail(error); }
@@ -785,6 +789,13 @@ export class OrbiSyncInstance {
     this.flush();
   }
 
+  /** Tracking uncertainty must not turn into an implicit reconnect replay. */
+  _forgetQueuedCommand(commandId: string): void {
+    this.unacknowledged.delete(commandId);
+    this.reliableQueue = this.reliableQueue.filter(item => item.messageId !== commandId);
+    this.stopFlushTimerIfIdle();
+  }
+
   private sendEnvelope(envelope: Envelope): void {
     // Resolve implicit revisions after initial sync/resume, once before the
     // first send. Retries keep the original payload for server deduplication.
@@ -924,6 +935,7 @@ export class OrbiSyncInstance {
   /** Permanently ends this instance handle; transport recovery does not call this. */
   _close(): void {
     this.closed = true;
+    this.commands._stop(true, "CLOSED");
     this.stopFlushTimer();
     this._cancelInitialDelivery();
     this.resetSnapshotAssembly();
@@ -1055,13 +1067,7 @@ export class OrbiSyncInstance {
   }
 
   /** Reliable: EntityCommand (F6 §2 — bounded, never drop). */
-  sendEntityCommand(opts: {
-    entityId: string;
-    operation: string;
-    expectedRevision?: number | bigint;
-    args?: Record<string, unknown>;
-    commandId?: string;
-  }): string {
+  sendEntityCommand(opts: EntityCommandOptions): string {
     this.ensureOpen();
     this.requireReady();
     stateBytes(opts.args ?? {}, 65536, false);
@@ -1156,6 +1162,7 @@ export class OrbiSyncInstance {
 
   private emit(event: string, payload: unknown): void {
     if (event === "entityCommand") {
+      this.commands._receipt(payload as EntityCommand);
       const receipt = payload as { commandId: string; expectedRevision: bigint; instanceRevision?: bigint };
       if (receipt.instanceRevision !== undefined) this.pendingInputs.get(receipt.commandId)?.settle({
         status: "accepted", commandId: receipt.commandId,
@@ -1163,6 +1170,7 @@ export class OrbiSyncInstance {
       });
     } else if (event === "error") {
       const error = payload as { requestMessageId?: string; code: string; message?: string; retryable?: boolean };
+      this.commands._error(error);
       if (error.requestMessageId) this.pendingInputs.get(error.requestMessageId)?.settle({
         status: error.retryable || ["PERSISTENCE_UNAVAILABLE", "REPLAY_WINDOW_EXPIRED"].includes(error.code) ? "uncertain" : "rejected",
         commandId: error.requestMessageId, code: error.code, detail: error.message ?? error.code,
@@ -1559,6 +1567,10 @@ export class OrbiSyncConnection {
         code: Number.isFinite(code) ? code : null,
         reason: reason || null,
       });
+      // Every socket close invalidates readiness before observers can submit
+      // work from a connection-state callback, including a normal code 1000.
+      this.instance?._stopSync(new SyncError(this.closedExplicitly ? "CLOSED" : "DISCONNECTED"),
+        this.closedExplicitly ? "closed" : code === 1000 ? "failed" : "reconnecting");
       if (this.closedExplicitly) {
         this.sessionState = "Closed";
         this.setConnectionPhase("closed", disconnect);
@@ -1570,8 +1582,6 @@ export class OrbiSyncConnection {
       }
       this.sessionState = "Resuming";
       this.setConnectionPhase("reconnecting", disconnect);
-      this.instance?._stopSync(new SyncError(this.closedExplicitly ? "CLOSED" : "DISCONNECTED"), this.closedExplicitly ? "closed" : code === 1000 ? "failed" : "reconnecting");
-      if (code === 1000) return;
       if (!this.closedExplicitly && !this.isReconnecting) {
         this.scheduleReconnect();
       }

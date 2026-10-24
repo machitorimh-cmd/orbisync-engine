@@ -760,6 +760,14 @@ impl InstanceActor {
         &mut self.persistence_outbox
     }
 
+    pub(crate) fn pending_legacy_persistence(&self) -> (u64, Option<std::time::Instant>) {
+        if self.uses_generation_admission() {
+            (0, None)
+        } else {
+            self.persistence_outbox.diagnostic_state()
+        }
+    }
+
     /// Drains deliverable persistence effects in insertion order (HIGH-002).
     /// Generation actors release only the committed prefix.
     ///
