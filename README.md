@@ -12,7 +12,11 @@ OrbiSyncは、複数の認証済みクライアントでワールド、エンテ
 
 ## ビルド済みサーバー
 
-[GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.1)にWindows x64用ZIPとLinux x86_64用tar.gzを用意しています。Rust・Node.jsは不要で、PostgreSQLは別途必要です。日英の起動ガイド、ランチャー、ライセンス、依存ライセンスを同梱しています。チェックサムは `SHA256SUMS.txt` です。[利用手順](deploy/distribution/README.ja.md)
+[GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2)のWindows x64用ZIP／Linux x86_64用tar.gzを展開し、`start-web-admin.cmd`／`start-web-admin.sh`を実行します。Windowsでは同梱の実行ファイルを直接開くこともできます。**「このPCで試す」を選ぶだけで、同梱PostgreSQLの準備・初期設定・エンジン起動・接続テストまで進みます。Rust・Node.js・Docker・DB接続URLの準備は不要です。**
+
+管理画面からDBとエンジンの停止・再開・再起動ができます。設定とデータは保存され、次回も同じ環境を使えます。診断画面には再試行やポート変更の操作があり、接続テストは実際のHTTP認証・WebSocket・参加・初期同期まで確認します。ローカル試用はこのPCのloopback内で動作します。既存の外部DBを使う手動設定も残しています。
+
+日英の起動ガイド、ランチャー、PostgreSQL本体・ソース・ライセンス、依存ライセンスを同梱しています。チェックサムは `SHA256SUMS.txt` です。[利用手順](deploy/distribution/README.ja.md)
 
 ## 開発状況
 

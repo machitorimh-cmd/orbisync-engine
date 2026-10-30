@@ -2,7 +2,7 @@
 
 [日本語](README.ja.md) | **English**
 
-This package runs the server and its embedded browser administration UI without installing Rust or Node.js. It is a development preview. PostgreSQL is not bundled: prepare an empty PostgreSQL database separately. Setup applies migrations and creates an administrator, so do not point it at an existing valuable database.
+Download, extract, and launch this package to try the server and its embedded browser administration UI. PostgreSQL 17.11 is bundled. Local trials require no separate Rust, Node.js, Docker, or PostgreSQL installation and no database URL. This is a development preview.
 
 ## Windows x64
 
@@ -12,17 +12,17 @@ Extract the ZIP into a dedicated directory writable by your ordinary user, then 
 .\orbisync-server.exe web-admin
 ```
 
-If the browser does not open, use the private URL printed in the terminal. This is not a signed installer. Verify the download source and SHA-256. If Windows reports a missing Microsoft Visual C++ runtime DLL, install Microsoft's official Visual C++ v14 x64 Redistributable.
+If the browser does not open, use the private URL printed in the terminal. This is a Windows x64 package; CI distribution tests target Windows Server 2022. Its C/C++ runtime is statically linked, so installing a Visual C++ Redistributable separately is unnecessary. This is not a signed installer. Verify the download source and SHA-256.
 
 ## Linux x86_64
 
-This is a glibc Linux build, not an Alpine/musl or ARM64 build. Consult the release notes for the required glibc version and checked environments. System CA certificates and `libgcc_s.so.1` are also required.
+This x86_64 build uses Ubuntu 22.04 as its baseline and requires glibc 2.35 or later. It is not an Alpine/musl or ARM64 build. Ordinary OS libraries such as `libgcc_s.so.1` are used; external HTTPS connections use the system CA certificates. Run as an ordinary user: PostgreSQL refuses to run as root. Consult the release notes for checked environments.
 
 Extract the archive into a dedicated writable directory owned by your ordinary user:
 
 ```sh
-tar -xzf orbisync-v0.1.0-preview.1-linux-x86_64.tar.gz
-cd orbisync-v0.1.0-preview.1-linux-x86_64
+tar -xzf orbisync-v0.1.0-preview.2-linux-x86_64.tar.gz
+cd orbisync-v0.1.0-preview.2-linux-x86_64
 ./start-web-admin.sh
 ```
 
@@ -36,14 +36,16 @@ Administration is restricted to the server's loopback interface. For access from
 
 ## First setup
 
-1. Enter the connection URL for an empty PostgreSQL database and check connectivity.
-2. For real users, provide an operator-approved 10,000-entry password denylist. For disposable local trials only, explicitly select **Local development**. Its generated placeholders do not block real common passwords.
-3. Enter the administrator's login ID and display name, then initialize. Setup creates keys and applies migrations. Save the one-time initial password securely.
-4. Select **Start engine**, wait for readiness, and sign in. Change the initial password and sign in again.
+1. Select **Try on this PC**. The package prepares its private database, applies migrations, creates an administrator, and starts the engine.
+2. The administration page signs in automatically and tests HTTP / WebSocket / join / sync. Save the administrator password shown once in a secure place.
+3. Use the page's stop, start, and restart controls. Opening the same installation reuses its database and configuration instead of initializing it again.
+4. If startup fails, follow the diagnostics. Port changes require an explicit choice in the page; unrelated processes are not stopped.
 
-The header switches between Japanese and English. The default administration port is 8090 and engine port is 8080. If a port is occupied, change configuration instead of stopping unrelated processes.
+Local trials use a temporary development password policy. For real users, use manual configuration to supply an operator-approved 10,000-entry denylist and other deployment settings. The existing external-PostgreSQL manual setup remains available. Manual initialization applies migrations and creates an administrator, so never point it at an existing valuable database.
 
-The launcher uses the package directory as its working directory. Configuration and secrets are stored in `.orbisync-admin/` by default. Restart using the same launcher in the same directory. Use `--data-dir` to select another location. Stop with Ctrl+C in the terminal. Securely back up both the database and configuration directory. Never add the credentials directory to a redistribution ZIP or Git.
+The header switches between Japanese and English. Administration prefers port 8090 and chooses a free port when it is occupied. Local trials also select free database and engine ports and save them. If a saved port becomes occupied on a later start, use the diagnostic port repair action.
+
+The launcher uses the package directory as its working directory. Configuration, secrets, and the local database are stored in `.orbisync-admin/` by default; the database files are under its `local-postgres/data/` directory. Restart using the same launcher in the same directory. Use `--data-dir` to select another location. Stop with Ctrl+C in the terminal. Securely back up both the database and configuration directory; copying live database files alone is not a consistent backup. Never add the private installation directory to a redistribution ZIP or Git.
 
 This local Web launcher does not automatically configure a public network service. See the [Web administration guide](https://github.com/machitorimh-cmd/orbisync-engine/blob/main/apps/admin-web/README.md) for ordinary `serve`, existing installations, recovery, and TLS considerations.
 
@@ -52,6 +54,10 @@ This local Web launcher does not automatically configure a public network servic
 - `orbisync-server[.exe]`: server with embedded administration UI and DB migrations
 - `start-web-admin.cmd` or `start-web-admin.sh`: launcher
 - `BUILD.json`: source commit, target, Rust version, and binary SHA-256
+- `runtime/postgres/`: PostgreSQL executables, standard modules, initialization data, and timezone data
+- `runtime/postgres/BUILD.json` / `SHA256SUMS`: pinned source URL/hash, build options, dependency audit, and checksums of every runtime file
+- `runtime/postgres/LICENSE` / `source/`: PostgreSQL license and verified official source containing incorporated-code copyright/license notices
+- `SHA256SUMS`: checksums of the extracted package files
 - `LICENSE-MIT` / `LICENSE-APACHE`: OrbiSync licenses
 - `THIRD-PARTY.json` / `third-party-licenses/`: dependency crate licenses and notices
 

@@ -108,6 +108,8 @@ jobs:
         run: python scripts/check_deny_expires.py
       - name: Unit tests for npm audit policy gate
         run: python -m unittest scripts/test_check_npm_audit.py
+      - name: Unit tests for bundled PostgreSQL integrity and packaging
+        run: python -m unittest scripts/test_postgres_runtime.py
       - name: Check HttpState wiring (IDEM-1)
         run: python scripts/check_http_state_wiring.py
       - name: Check HTTP handler fail-closed (AUD-C3)
@@ -244,6 +246,10 @@ jobs:
       - name: Admin operations browser regressions
         working-directory: apps/admin-console-web
         run: npm run test:browser
+      - name: Local startup administration browser regression
+        run: node scripts/verify_admin_local_start.cjs
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/apps/admin-console-web/node_modules/@playwright/test
       - name: Both reference apps pagination browser regressions
         working-directory: apps/whiteboard
         run: npm run test:browser
@@ -426,6 +432,10 @@ jobs:
     name: Design and protocol validation
     uses: ./.github/workflows/design-validation.yml
 
+  distribution:
+    name: Consumer distributions
+    uses: ./.github/workflows/distribution-build.yml
+
   pr-ci:
     name: PR CI
     runs-on: ubuntu-latest
@@ -444,6 +454,7 @@ jobs:
       - integration
       - restore-drill
       - design-and-protocol-validation
+      - distribution
     steps:
       - name: Fail when any required job failed
         run: |
@@ -460,6 +471,7 @@ jobs:
           echo "integration:     ${{ needs.integration.result }}"
           echo "restore-drill:   ${{ needs.restore-drill.result }}"
           echo "design-and-protocol-validation: ${{ needs.design-and-protocol-validation.result }}"
+          echo "distribution:   ${{ needs.distribution.result }}"
           if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "true" ]; then
             echo "::error::a required PR CI item failed"
             exit 1

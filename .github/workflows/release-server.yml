@@ -1,0 +1,54 @@
+name: Prepare or publish server release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing v-prefixed tag at the selected commit
+        required: true
+        type: string
+      publish:
+        description: Publish verified bundles after the full CI has succeeded
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    uses: ./.github/workflows/distribution-build.yml
+    with:
+      version: ${{ inputs.version }}
+  publish:
+    if: inputs.publish
+    needs: distribution
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: orbisync-bundle-*
+          path: release-assets
+          merge-multiple: true
+      - name: Require matching tag and successful full CI, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9A-Za-z.-]+$ ]]
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          conclusion=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --status completed --json conclusion --jq 'map(select(.conclusion == "success")) | length')
+          test "$conclusion" -gt 0
+          cat release-assets/*.sha256 > release-assets/SHA256SUMS.txt
+          (cd release-assets && sha256sum -c SHA256SUMS.txt)
+          release_flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag --title "OrbiSync $RELEASE_TAG" --generate-notes "${release_flags[@]}" release-assets/*

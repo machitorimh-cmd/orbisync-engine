@@ -1,5 +1,75 @@
-// UI-owned copy only. Server diagnostics, names, IDs, permissions and JSON stay raw.
+import { createLocalConnection } from '/admin-connection.js';
+
+// UI-owned copy only. Legacy manual diagnostics, names, IDs, permissions and JSON stay raw.
 const japanese = {
+  'LOCAL START': 'このPCで起動',
+  'Try on this PC': 'このPCで試す',
+  'Continue local trial': 'ローカル試用を再開',
+  'Prepare a private local PostgreSQL database, start the engine, and check a real connection. No SDK build or protocol generation is needed.': '専用のローカル PostgreSQL を準備し、エンジンを起動して実際の接続を確認します。SDK のビルドや通信コードの生成は不要です。',
+  'The complete server distribution includes PostgreSQL. Trial data is kept when stopped. This mode is for local testing.': '完全なサーバー配布物には PostgreSQL が含まれています。停止しても試用データは残ります。このモードはローカルでの試用向けです。',
+  'Not started': '未起動', 'Ready': '準備完了', 'Stopped': '停止済み',
+  'Waiting': '待機中', 'Passed': '成功', 'Failed': '失敗', 'Not reached': '未実行', 'Checking…': '確認中…', 'Not tested': '未確認',
+  'Database': 'データベース', 'Setup': '初期設定', 'Engine': 'エンジン', 'Connection test': '接続テスト',
+  'Local startup progress': 'ローカル起動の進み具合',
+  'Retry local startup': 'ローカル起動を再試行',
+  'Use my own database': '自分のデータベースを使う',
+  'Use your own PostgreSQL database': 'PostgreSQL を手動で設定する',
+  'Stop engine and local database': 'エンジンとローカルDBを停止',
+  'Stop engine': 'エンジンを停止', 'Restart engine': 'エンジンを再起動',
+  'CONNECTION CHECK': '接続確認', 'Test your connection': '接続を試す',
+  'Test connection': '接続テスト', 'Check setup': '構成を診断',
+  'This check uses real authentication, a WebSocket connection, room entry, and initial state synchronization. It does not publish credentials or create a game project.': '実際の認証、WebSocket 接続、入室、初期状態の同期を確認します。認証情報の公開やゲームプロジェクトの作成は行いません。',
+  'Start the engine to test a connection.': 'エンジンを起動すると接続をテストできます。',
+  'The full connection test is available in local trial. Existing databases are not seeded.': '接続テストはローカル試用環境で利用できます。既存のデータベースにテスト用データは作成しません。',
+  'Sign in before testing a connection.': '接続テストの前にログインしてください。',
+  'Ready to test a real connection.': '実際の接続をテストできます。',
+  'Connection check results': '接続テストの結果',
+  'HTTP authentication': 'HTTP 認証', 'WebSocket': 'WebSocket', 'Room entry': '入室', 'Initial synchronization': '初期同期',
+  'Retry connection test': '接続テストを再試行', 'Check again': 'もう一度確認',
+  'Choose an available engine port': '空いているエンジンポートを選ぶ',
+  'Choose another database port': '別のデータベースポートを選ぶ',
+  'Preparing the local database…': 'ローカルDBを準備中…', 'Starting the database…': 'データベースを起動中…',
+  'Applying initial setup…': '初期設定を適用中…', 'Starting the engine…': 'エンジンを起動中…',
+  'Stopping safely…': '安全に停止中…', 'Restarting…': '再起動中…', 'Testing the connection…': '接続テスト中…',
+  'Startup needs attention': '起動に必要な確認があります',
+  'The bundled database runtime is missing. Extract the complete server distribution, then check again, or use your own database.': '同梱のデータベース実行環境が見つかりません。完全なサーバー配布物を展開して再確認するか、自分のデータベースを使用してください。',
+  'Use the database runtime supplied with this installation. Existing database files were preserved.': 'この環境に対応する同梱データベース実行環境を使用してください。既存のデータは保持されています。',
+  'The private installation folder cannot be used. Check its permissions, then try again.': '専用の保存フォルダーを利用できません。アクセス権を確認し、もう一度試してください。',
+  'Another launcher is using this installation. Close that launcher, then try again.': '別のランチャーがこの環境を使用中です。そちらを終了してから、もう一度試してください。',
+  'Database files need operator recovery. They were preserved; do not initialize over them.': 'データベースには管理者による復旧が必要です。データは保持されています。既存ファイルの上に初期化しないでください。',
+  'The database identity could not be verified. No unrelated process was stopped. Check the installation before retrying.': 'データベースの識別情報を確認できません。無関係なプロセスは停止していません。環境を確認してから再試行してください。',
+  'The database port is in use. Choose another database port; other applications will not be stopped.': 'データベースのポートが使用中です。別のポートを選んでください。他のアプリは停止しません。',
+  'The database could not be initialized. Check the bundled runtime and folder permissions, then retry.': 'データベースを初期化できません。同梱の実行環境とフォルダーのアクセス権を確認して、再試行してください。',
+  'The database could not start. Check the bundled runtime and folder permissions, then retry.': 'データベースを起動できません。同梱の実行環境とフォルダーのアクセス権を確認して、再試行してください。',
+  'The database did not become ready. Check local resources, then retry.': 'データベースの準備が時間内に完了しませんでした。PC の空きリソースを確認して、再試行してください。',
+  'Local database preparation failed. Its files were kept. Check setup, then retry.': 'ローカルDBの準備に失敗しました。ファイルは保持されています。構成を診断してから再試行してください。',
+  'The database did not stop cleanly. Check setup before trying again.': 'データベースを正常に停止できませんでした。構成を診断してから、もう一度試してください。',
+  'The database is unavailable. Retry local startup or check your database settings.': 'データベースに接続できません。ローカル起動を再試行するか、接続設定を確認してください。',
+  'The engine port is in use. Choose an available port; other applications will not be stopped.': 'エンジンのポートが使用中です。空いているポートを選んでください。他のアプリは停止しません。',
+  'Check the saved settings, then retry startup.': '保存済みの設定を確認し、起動を再試行してください。',
+  'The database needs attention. Check setup before retrying.': 'データベースの確認が必要です。構成を診断してから再試行してください。',
+  'The password corpus is missing. Check the saved password policy before retrying.': 'パスワードコーパスが見つかりません。保存されたパスワードポリシーを確認してから再試行してください。',
+  'The password corpus is invalid. Check the saved password policy before retrying.': 'パスワードコーパスが不正です。保存されたパスワードポリシーを確認してから再試行してください。',
+  'The saved signing key could not be loaded. Check the private installation before retrying.': '保存された署名鍵を読み込めません。専用の保存環境を確認してから再試行してください。',
+  'Complete initialization before starting the engine.': 'エンジンを起動する前に初期設定を完了してください。',
+  'The engine could not start. Check setup, then retry startup.': 'エンジンを起動できませんでした。構成を診断して、起動を再試行してください。',
+  'The engine did not become ready. Check setup, then retry startup.': 'エンジンの準備が時間内に完了しませんでした。構成を診断して、起動を再試行してください。',
+  'The engine is still stopping. Check its status before trying again.': 'エンジンの停止が続いています。状態を確認してから、もう一度試してください。',
+  'The local trial credentials changed. Sign in with the current administrator password.': 'ローカル試用環境の認証情報が変更されています。現在の管理者パスワードでログインしてください。',
+  'The local trial credentials are unavailable. Sign in with your saved administrator password.': 'ローカル試用環境の認証情報を利用できません。保存した管理者パスワードでログインしてください。',
+  'Another local operation is running. Wait for it to finish, then check status.': '別のローカル操作を実行中です。完了を待ってから状態を確認してください。',
+  'Local trial uses its dedicated database. Use the database port repair action to change its port.': 'ローカル試用環境では専用のデータベースを使用します。ポートの変更にはデータベースポートの復旧操作を使用してください。',
+  'Open the private launcher link and sign in with an administrator account.': '専用の起動リンクを開き、管理者アカウントでログインしてください。',
+  'The operation could not finish. Check setup, then retry.': '処理を完了できませんでした。構成を診断してから再試行してください。',
+  'Connection confirmed: HTTP, WebSocket, room entry, and initial synchronization passed.': '接続できました。HTTP、WebSocket、入室、初期同期はすべて成功です。',
+  'The connection test did not complete. Check setup, then try again.': '接続テストを完了できませんでした。構成を診断して、もう一度試してください。',
+  'Setup checks passed.': '構成の診断は成功しました。',
+  'Setup checks did not complete. Check again.': '構成の診断が完了していません。もう一度確認してください。',
+  'Initial administrator password': '初期管理者パスワード',
+  'Save it securely. This local administrator password is shown only once.': '安全に保存してください。このローカル管理者パスワードは一度だけ表示します。',
+  'Signed in to your local trial.': 'ローカル試用環境にログインしました。',
+  'Saved changes are waiting. Click Restart engine to apply them.': '変更を保存しました。「エンジンを再起動」を押すと適用されます。',
+  'Saved. Restart the engine to apply changes.': '保存しました。エンジンを再起動すると変更が適用されます。',
   'OrbiSync · Engine administration': 'OrbiSync · エンジン管理',
   'OrbiSync / operator console': 'OrbiSync / 管理コンソール',
   'Engine administration': 'エンジン管理',
@@ -193,11 +263,16 @@ function initializeLanguage() {
 
 // Plain browser module embedded in the Rust executable. No consumer build step.
 const $ = id => document.getElementById(id);
-const capability = location.hash.slice(1) || sessionStorage.getItem('orbisync-local') || '';
-if (capability) sessionStorage.setItem('orbisync-local', capability);
+let capability = location.hash.slice(1);
+try {
+  capability ||= sessionStorage.getItem('orbisync-local') || '';
+  if (capability) sessionStorage.setItem('orbisync-local', capability);
+} catch { /* The private link remains usable when browser storage is blocked. */ }
 history.replaceState(null, '', location.pathname);
 let accessToken = null;
 let lastStatus = null;
+let statusRequestEpoch = 0;
+let startupUi = null;
 let assignedIds = [];
 const pages = {};
 const records = { users: [], roles: [], worlds: [], instances: [] };
@@ -211,7 +286,11 @@ function parseManifest() {
   catch (error) { error.uiRender = () => `${t('Invalid JSON manifest.')}\n${error.message}`; throw error; }
 }
 function uiNotice(message, error = false) { notice(message, error, false); }
-function credential(value) { $('credentialValue').textContent = value; $('credential').hidden = false; }
+function credential(value, initial = false) {
+  localized($('credentialTitle'), initial ? 'Initial administrator password' : 'One-time temporary password');
+  localized($('credentialHelp'), initial ? 'Save it securely. This local administrator password is shown only once.' : 'Save it securely, then change it after signing in.');
+  $('credentialValue').textContent = value; $('credential').hidden = false;
+}
 function clearCredential() { $('credentialValue').textContent = ''; $('credential').hidden = true; }
 // API idempotency keys require UUIDv7, not crypto.randomUUID() (UUIDv4).
 function uuid7() {
@@ -223,7 +302,14 @@ function uuid7() {
 }
 async function request(path, method = 'GET', body, extra = {}) {
   const headers = { 'x-orbisync-local': capability, ...extra };
-  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const pathname = path.split('?')[0];
+  // Startup/status operations use only the local capability. In particular,
+  // background polling must not send an engine JWT to a reused launcher port.
+  // Probe accepts the current signed-in identity, or the backend's local-trial
+  // credentials when no token is available.
+  const bearerRequired = pathname.startsWith('/api/v1/') || pathname === '/admin/settings' || pathname === '/admin/probe';
+  for (const name of Object.keys(headers)) if (name.toLowerCase() === 'authorization') delete headers[name];
+  if (accessToken && bearerRequired) headers.Authorization = `Bearer ${accessToken}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET') headers['Idempotency-Key'] = uuid7();
   const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
@@ -231,8 +317,9 @@ async function request(path, method = 'GET', body, extra = {}) {
   try { data = text ? JSON.parse(text) : null; } catch { /* Error bodies may be plain text. */ }
   if (!response.ok) {
     const raw = data?.error?.message || data?.message;
-    if (raw) throw new Error(raw);
-    const error = new Error(text);
+    const error = new Error(raw || text);
+    error.code = data?.error?.code || data?.code || (response.status === 401 ? 'AUTHENTICATION_REQUIRED' : response.status === 403 ? 'FORBIDDEN' : 'REQUEST_FAILED');
+    if (raw) throw error;
     error.uiRender = () => `${t('Request failed')} (${response.status}). ${response.status === 403 ? t('Open the private URL printed by this launcher, or sign in with the required role.') : ''}${text ? `\n${text}` : ''}`;
     throw error;
   }
@@ -249,13 +336,18 @@ function action(id, handler, event = 'click') {
 }
 function setupBody() { return {database_url: $('databaseUrl').value, engine_bind: $('engineBind').value, local_development: document.querySelector('input[name=environment]:checked').value === 'development', corpus_path: $('corpusPath').value, login_id: $('adminLogin').value, display_name: $('adminName').value}; }
 async function refreshStatus() {
-  lastStatus = await request('/admin/status');
+  const epoch = ++statusRequestEpoch;
+  const next = await request('/admin/status');
+  if (epoch !== statusRequestEpoch) return lastStatus || next;
+  lastStatus = next;
   $('setup').hidden = lastStatus.initialized; $('engine').hidden = !lastStatus.initialized;
   $('login').hidden = !lastStatus.initialized || !!accessToken;
   localized($('readiness'), lastStatus.ready ? 'Engine ready' : lastStatus.initialized ? 'Engine not ready' : 'Setup required');
   localized($('engineStatus'), () => `${t('Engine: ')}${t(lastStatus.engine)}${lastStatus.existing ? t(' · Existing installation; configuration is read-only.') : ''}`);
   $('startEngine').hidden = lastStatus.engine !== 'not started';
   $('restartNotice').hidden = !lastStatus.restart_required;
+  startupUi?.observe(lastStatus);
+  return lastStatus;
 }
 action('refreshStatus', refreshStatus);
 action('dismissCredential', clearCredential);
@@ -266,20 +358,24 @@ action('setupForm', async () => {
   $('loginId').value = $('adminLogin').value; $('databaseUrl').value = '';
   credential(result.temporary_password); uiNotice(result.message); await refreshStatus();
 }, 'submit');
-action('startEngine', async () => { uiNotice((await request('/admin/start', 'POST', {})).message); await refreshStatus(); });
 function clearSession() {
   accessToken = null; $('session').hidden = true; $('management').hidden = true; $('login').hidden = false;
   $('currentPassword').value = ''; $('newPassword').value = ''; clearCredential();
   for (const name of Object.keys(records)) { records[name] = []; pages[name] = null; $(`${name}Table`).replaceChildren(); }
   $('roleChoices').replaceChildren(); $('assignUser').replaceChildren(); $('manifest').value = ''; $('configFields').replaceChildren();
+  startupUi?.authChanged();
+}
+async function signedIn(token, trial = false) {
+  accessToken = token; $('loginPassword').value = '';
+  const me = await api('auth/me'); localized($('signedIn'), () => `${t('Signed in as ')}${me.display_name} (${me.login_id})`);
+  $('session').hidden = false; $('management').hidden = false; $('login').hidden = true; $('passwordDetails').open = !trial;
+  uiNotice(trial ? 'Signed in to your local trial.' : 'Signed in. If this is a temporary password, change it now.');
+  try { await loadUsers(); await loadRoles(); } catch (error) { if (trial) throw error; errorNotice(error); }
+  startupUi?.authChanged();
 }
 action('loginForm', async () => {
   const result = await api('auth/login', 'POST', {login_id: $('loginId').value, password: $('loginPassword').value});
-  accessToken = result.access_token; $('loginPassword').value = '';
-  const me = await api('auth/me'); localized($('signedIn'), () => `${t('Signed in as ')}${me.display_name} (${me.login_id})`);
-  $('session').hidden = false; $('management').hidden = false; $('login').hidden = true; $('passwordDetails').open = true;
-  uiNotice('Signed in. If this is a temporary password, change it now.');
-  try { await loadUsers(); await loadRoles(); } catch (error) { errorNotice(error); }
+  await signedIn(result.access_token);
 }, 'submit');
 action('logout', async () => { try {await api('auth/logout', 'POST');} finally {clearSession(); uiNotice('Signed out.');} });
 action('passwordForm', async () => {await api('auth/change-password', 'POST', {current_password: $('currentPassword').value, new_password: $('newPassword').value}); clearSession(); uiNotice('Password changed. Sign in with your new password.');}, 'submit');
@@ -341,14 +437,31 @@ async function loadSettings() {
   $('manifest').placeholder = t('Managed by the existing installation.');
   $('manifest').dataset.languageAttribute = 'placeholder'; $('manifest').dataset.languageSource = 'Managed by the existing installation.';
   for (const id of ['manifest', 'replacementDb', 'saveSettings']) $(id).disabled = result.read_only;
+  if (lastStatus?.local_trial) $('replacementDb').disabled = true;
+  $('managedDatabaseHint').hidden = !lastStatus?.local_trial;
   if (result.read_only) uiNotice('Existing configuration is read-only. Use its original operator workflow for changes.');
 }
 action('refreshSettings', loadSettings);
-action('settingsForm', async () => {const values = Object.fromEntries([...$('configFields').querySelectorAll('input')].map(i => [i.dataset.key, i.value])); const result = await request('/admin/settings', 'POST', {values, database_url: $('replacementDb').value, manifest: parseManifest()}); $('replacementDb').value = ''; uiNotice(result.message); await refreshStatus();}, 'submit');
+action('settingsForm', async () => {const values = Object.fromEntries([...$('configFields').querySelectorAll('input')].map(i => [i.dataset.key, i.value])); await request('/admin/settings', 'POST', {values, database_url: $('replacementDb').value, manifest: parseManifest()}); $('replacementDb').value = ''; uiNotice('Saved. Restart the engine to apply changes.'); await refreshStatus();}, 'submit');
 for (const button of document.querySelectorAll('[data-tab]')) button.addEventListener('click', async () => {
   const name = button.dataset.tab;
   for (const b of document.querySelectorAll('[data-tab]')) {b.setAttribute('aria-selected', String(b === button)); $(b.dataset.tab).hidden = b !== button;}
   try {if (name === 'worlds') {await loadWorlds(); await loadInstances();} else if (name === 'config') await loadSettings(); else if (name === 'roles') await loadRoles(); else await loadUsers();} catch (error) {errorNotice(error);}
+});
+const manualSetup = document.createElement('details'); manualSetup.id = 'manualSetup';
+const manualSummary = document.createElement('summary'); localized(manualSummary, 'Use your own PostgreSQL database');
+const manualFields = document.createElement('div');
+while ($('setup').firstChild) manualFields.appendChild($('setup').firstChild);
+manualSetup.append(manualSummary, manualFields); $('setup').append(manualSetup);
+startupUi = createLocalConnection({ request, refreshStatus, localize: localized,
+  canProbe: () => !!accessToken || lastStatus?.local_trial === true,
+  onTrial: async result => {
+    if (typeof result.initial_password === 'string') credential(result.initial_password, true);
+    if (typeof result.login_id === 'string') $('loginId').value = result.login_id;
+    if (typeof result.access_token !== 'string' || !result.access_token) throw new Error('Local sign-in failed');
+    await signedIn(result.access_token, true);
+  },
+  showManual: () => { $('setup').hidden = false; manualSetup.open = true; $('databaseUrl').focus(); },
 });
 initializeLanguage();
 if (!capability) uiNotice('Open the private administration URL printed by the web-admin command. This page needs the launch capability in its URL fragment.', true);

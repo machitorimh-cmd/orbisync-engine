@@ -47,16 +47,20 @@ struct Installation {
     dir: PathBuf,
     config_path: PathBuf,
     existing: bool,
-    attempted_start: bool,
     restart_required: bool,
-    engine: Option<std::thread::JoinHandle<Result<(), ServerError>>>,
+    engine: Option<std::process::Child>,
     engine_url: Option<String>,
+    engine_proof: Option<String>,
+    managed_db: Option<local_postgres::LocalPostgres>,
 }
 struct WebState {
     install: Mutex<Installation>,
     capability: String,
     origin: String,
     client: reqwest::Client,
+    operation: std::sync::Mutex<Value>,
+    status_cache: std::sync::Mutex<Value>,
+    busy: std::sync::atomic::AtomicBool,
 }
 
 pub(super) fn run(
@@ -82,9 +86,13 @@ pub(super) fn run(
         .unwrap_or_else(|| dir.join("orbisync.toml"));
     let runtime = build_runtime(2).map_err(ServerError::Runtime)?;
     runtime.block_on(async {
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-            .await
-            .map_err(ServerError::Listener)?;
+        let listener = match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.map_err(ServerError::Listener)?
+            }
+            Err(error) => return Err(ServerError::Listener(error)),
+        };
         let address = listener.local_addr().map_err(ServerError::Listener)?;
         let origin = format!("http://{address}");
         let capability = random_secret();
@@ -93,13 +101,17 @@ pub(super) fn run(
                 dir,
                 config_path,
                 existing: existing.is_some(),
-                attempted_start: false,
                 restart_required: false,
                 engine: None,
                 engine_url: None,
+                engine_proof: None,
+                managed_db: None,
             }),
             capability: capability.clone(),
             origin: origin.clone(),
+            operation: std::sync::Mutex::new(json!({"phase":"idle","busy":false,"error_code":null})),
+            status_cache: std::sync::Mutex::new(json!({"initialized":false,"existing":existing.is_some(),"engine":"not started","ready":false,"restart_required":false})),
+            busy: std::sync::atomic::AtomicBool::new(false),
             client: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -122,6 +134,13 @@ pub(super) fn run(
                 }),
             )
             .route("/admin/status", get(status))
+            .route("/admin-connection.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../../../apps/admin-web/src/local_connection.js")) }))
+            .route("/admin/local-trial", post(local_trial))
+            .route("/admin/stop", post(stop))
+            .route("/admin/restart", post(restart))
+            .route("/admin/diagnostics", get(diagnostics))
+            .route("/admin/repair", post(repair))
+            .route("/admin/probe", post(probe_connection))
             .route("/admin/check", post(check))
             .route("/admin/initialize", post(initialize))
             .route("/admin/start", post(start))
@@ -147,14 +166,8 @@ pub(super) fn run(
             .with_graceful_shutdown(wait_for_signal())
             .await
             .map_err(ServerError::Listener)?;
-        let engine = state.install.lock().await.engine.take();
-        if let Some(engine) = engine {
-            // Engine receives the same Ctrl+C and uses its existing drain path.
-            tokio::task::spawn_blocking(move || engine.join())
-                .await
-                .map_err(|_| ServerError::Bootstrap)?
-                .map_err(|_| ServerError::Bootstrap)??;
-        }
+        let mut install = state.install.lock().await;
+        stop_installation(&state, &mut install).await.map_err(|_| ServerError::Bootstrap)?;
         Ok(())
     })
 }
@@ -166,8 +179,10 @@ async fn protect(State(state): State<Arc<WebState>>, request: Request, next: Nex
     let valid_origin = headers
         .get("origin")
         .is_none_or(|v| v.to_str().ok() == Some(state.origin.as_str()));
-    let public_asset = matches!(request.uri().path(), "/" | "/admin.js")
-        && request.method() == axum::http::Method::GET;
+    let public_asset = matches!(
+        request.uri().path(),
+        "/" | "/admin.js" | "/admin-connection.js"
+    ) && request.method() == axum::http::Method::GET;
     let authorized = headers
         .get("x-orbisync-local")
         .and_then(|v| v.to_str().ok())
@@ -218,13 +233,40 @@ impl Installation {
 }
 
 async fn status(State(state): State<Arc<WebState>>) -> Json<Value> {
-    let install = state.install.lock().await;
-    let engine_state = match &install.engine {
-        Some(engine) if !engine.is_finished() => "running",
-        Some(_) => "stopped; inspect server diagnostic and restart launcher",
-        None => "not started",
+    let operation = state
+        .operation
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let Ok(mut install) = state.install.try_lock() else {
+        let mut cached = state
+            .status_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        cached["operation"] = operation;
+        return Json(cached);
     };
-    let url = install.engine_url.clone();
+    let running = install
+        .engine
+        .as_mut()
+        .is_some_and(|engine| engine.try_wait().is_ok_and(|exit| exit.is_none()));
+    if !running {
+        install.engine_url = None;
+        install.engine_proof = None;
+    }
+    let engine_state = if running {
+        "running"
+    } else if install.engine.is_some() || operation["phase"] == "stopped" {
+        "stopped"
+    } else {
+        "not started"
+    };
+    let url = if running && verify_engine_owner(&state, &install).await.is_ok() {
+        install.engine_url.clone()
+    } else {
+        None
+    };
     let mut result = json!({"initialized":install.initialized(), "existing":install.existing, "engine":engine_state, "restart_required":install.restart_required});
     result["initialization_pending"] = json!(install.dir.join("initializing").exists());
     // allow-hardcoded-secret: literal is a corpus filename, not a credential.
@@ -234,11 +276,19 @@ async fn status(State(state): State<Arc<WebState>>) -> Json<Value> {
                 .any(|line| line.starts_with("orbisync-dev-placeholder-"))
         });
     result["development_corpus"] = json!(development_corpus);
+    result["local_trial"] = json!(install.dir.join("local-trial.json").is_file());
+    result["managed_db"] = install
+        .managed_db
+        .as_ref()
+        .map(|database| json!(database.status()))
+        .unwrap_or(Value::Null);
+    result["operation"] = operation;
     drop(install);
     let ready = if let Some(url) = url {
         state
             .client
             .get(format!("{url}/health/ready"))
+            .timeout(std::time::Duration::from_secs(1))
             .send()
             .await
             .is_ok_and(|r| r.status().is_success())
@@ -246,12 +296,18 @@ async fn status(State(state): State<Arc<WebState>>) -> Json<Value> {
         false
     };
     result["ready"] = json!(ready);
+    *state
+        .status_cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = result.clone();
     Json(result)
 }
 
 #[derive(Deserialize)]
 struct Setup {
     database_url: String,
+    #[serde(default)]
+    managed_local: bool,
     #[serde(default)]
     local_development: bool,
     #[serde(default)]
@@ -303,7 +359,7 @@ async fn initialize(
     State(state): State<Arc<WebState>>,
     Json(body): Json<Setup>,
 ) -> WebResult<Json<Value>> {
-    let install = state.install.lock().await;
+    let mut install = state.install.lock().await;
     if install.initialized() || install.dir.join("initializing").exists() {
         return Err(bad(
             "Setup is already closed or a previous initialization needs recovery. Existing files and database are preserved.",
@@ -405,7 +461,38 @@ async fn initialize(
         b"{\"version\":1,\"rules\":[]}",
     )
     .map_err(io_error)?;
-    run_migrations(&pool).await.map_err(|_| bad("Migrations failed. Setup is closed; preserve the installation directory and inspect PostgreSQL permissions before recovery."))?;
+    if body.managed_local {
+        let database = install
+            .managed_db
+            .as_ref()
+            .ok_or_else(|| local_error("database_identity_mismatch"))?;
+        if database.application_database_url()
+            != secrets
+                .get(&config.database.url_env)
+                .cloned()
+                .unwrap_or_default()
+        {
+            return Err(local_error("database_identity_mismatch"));
+        }
+        let migration_pool = connect(&database.migration_database_url()).await?;
+        let migrated = run_migrations(&migration_pool).await;
+        migration_pool.close().await;
+        migrated.map_err(|_| local_error("migration_failed"))?;
+        database
+            .grant_runtime_access()
+            .await
+            .map_err(database_error)?;
+    } else {
+        if let Some(database) = install.managed_db.as_mut() {
+            database.stop().await.map_err(database_error)?;
+        }
+        install.managed_db.take();
+        let marker = install.dir.join("local-trial.json");
+        if marker.is_file() {
+            std::fs::remove_file(marker).map_err(io_error)?;
+        }
+        run_migrations(&pool).await.map_err(|_| bad("Migrations failed. Setup is closed; preserve the installation directory and inspect PostgreSQL permissions before recovery."))?;
+    }
     let env = MapEnv::from_pairs(secrets);
     let query = PgIdentityQueryStore::new(pool.clone(), &config, &env)
         .map_err(|_| bad("Identity query could not be initialized."))?;
@@ -448,74 +535,14 @@ fn loopback_bind(bind: &str) -> WebResult<std::net::SocketAddr> {
     Ok(addr)
 }
 async fn start(State(state): State<Arc<WebState>>) -> WebResult<Json<Value>> {
-    let mut install = state.install.lock().await;
-    if !install.initialized() {
-        return Err(bad("Initialize the installation first."));
-    }
-    if install.attempted_start {
-        return Err(bad(
-            "Engine start has already been requested. If it failed, correct the configuration and restart the launcher.",
-        ));
-    }
-    let config = install.config()?;
-    let address = loopback_bind(&config.server.bind)?;
-    if address.to_string() == state.origin.strip_prefix("http://").unwrap_or_default() {
-        return Err(bad("Engine and administration ports must differ."));
-    }
-    let env = install.env()?;
-    config
-        .verify_secrets(&env)
-        .map_err(|e| bad(format!("{}: {}", e.key(), e.detail())))?;
-    let corpus = env.get(PASSWORD_DENYLIST_ENV).ok_or_else(|| bad("Password corpus is missing. Set ORBISYNC_PASSWORD_DENYLIST_FILE for an existing installation."))?;
-    PasswordPolicy::production(
-        read_password_corpus(Path::new(&corpus))
-            .map_err(|_| bad("Cannot read password corpus."))?,
-    )
-    .map_err(|_| bad("Password corpus is invalid."))?;
-    create_token_service(&env, &config).map_err(|_| bad("Token signing key is invalid."))?;
-    // Check before spawning; the stock server owns the actual bind and startup.
-    let probe = std::net::TcpListener::bind(address)
-        .map_err(|_| bad("Engine port is already in use. No existing service was changed."))?;
-    drop(probe);
-    let input_rules = if install.existing {
-        std::env::var_os("ORBISYNC_INPUT_RULES_FILE").map(PathBuf::from)
-    } else {
-        Some(install.dir.join("input-rules.json"))
-    };
-    let cli = Cli {
-        config: Some(install.config_path.clone()),
-        input_rules,
-        bind: None,
-        log_level: None,
-        log_format: None,
-        command: Some(Command::Serve),
-    };
-    let engine = std::thread::Builder::new()
-        .name("orbisync-engine".into())
-        .spawn(move || {
-            let result = run_configured(cli, env);
-            if let Err(error) = &result {
-                eprintln!("Engine startup stopped: {error}");
-            }
-            result
-        })
-        .map_err(io_error)?;
-    install.attempted_start = true;
-    install.engine_url = Some(format!("http://{address}"));
-    install.engine = Some(engine);
-    Ok(Json(
-        json!({"message":"Engine start requested. Readiness will confirm when it accepts requests."}),
-    ))
+    let _operation = LocalOperation::begin(&state, "db_starting")?;
+    let result = start_installation(&state, &mut *state.install.lock().await).await;
+    complete_operation(&state, &result, "ready");
+    result.map(|()| Json(json!({"message":"Engine ready.","ready":true})))
 }
 
 async fn require_admin(state: &WebState, headers: &HeaderMap) -> WebResult<()> {
-    let url = state
-        .install
-        .lock()
-        .await
-        .engine_url
-        .clone()
-        .ok_or_else(|| bad("Start the engine and sign in first."))?;
+    let url = verified_engine_url(state, &mut *state.install.lock().await).await?;
     let token = headers.get("authorization").ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
@@ -572,6 +599,9 @@ async fn save_settings(
         return Err(bad(
             "Existing installations are read-only here. Edit their original configuration using the ordinary operator workflow.",
         ));
+    }
+    if install.dir.join("local-trial.json").is_file() && !body.database_url.is_empty() {
+        return Err(local_error("managed_database_fixed"));
     }
     let mut config = install.config()?;
     let mut table: toml::Table = std::fs::read_to_string(&install.config_path)
@@ -667,8 +697,9 @@ async fn proxy(State(state): State<Arc<WebState>>, request: Request) -> Response
     {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(url) = state.install.lock().await.engine_url.clone() else {
-        return bad("Engine has not started.").into_response();
+    let url = match verified_engine_url(&state, &mut *state.install.lock().await).await {
+        Ok(url) => url,
+        Err(error) => return error.into_response(),
     };
     let target = format!(
         "{url}{path}{}",
@@ -741,6 +772,12 @@ fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 pub(super) fn private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let system_directory = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| std::io::Error::other("Windows system directory is unavailable."))?,
+    )
+    .join("System32");
     if !path.exists() {
         #[allow(unused_mut)] // Mutated by the Unix permissions extension.
         let mut builder = std::fs::DirBuilder::new();
@@ -753,7 +790,7 @@ pub(super) fn private_dir(path: &Path) -> std::io::Result<()> {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
-            let user = std::process::Command::new("whoami")
+            let user = std::process::Command::new(system_directory.join("whoami.exe"))
                 .args(["/user", "/fo", "csv", "/nh"])
                 .creation_flags(0x08000000)
                 .output()?;
@@ -767,7 +804,7 @@ pub(super) fn private_dir(path: &Path) -> std::io::Result<()> {
             if !user.status.success() || !sid.starts_with("S-1-") {
                 return Err(std::io::Error::other("Cannot determine directory owner."));
             }
-            let result = std::process::Command::new("icacls")
+            let result = std::process::Command::new(system_directory.join("icacls.exe"))
                 .arg(path)
                 .args(["/inheritance:r", "/grant:r", &format!("*{sid}:(OI)(CI)F")])
                 .creation_flags(0x08000000)
@@ -793,8 +830,11 @@ pub(super) fn private_dir(path: &Path) -> std::io::Result<()> {
             ));
         }
         // Pass the path as an environment value, never interpolate shell code.
-        let check = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $a=Get-Acl -LiteralPath $env:ORBISYNC_PRIVATE_DIR; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if ($a.Owner -ne [System.Security.Principal.WindowsIdentity]::GetCurrent().Name) { exit 1 }; foreach($r in $a.Access) { $id=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; if($r.AccessControlType -eq 'Allow' -and $id -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } }; exit 0"])
+        let check = std::process::Command::new(system_directory.join("WindowsPowerShell/v1.0/powershell.exe"))
+            // Avoid importing PowerShell modules: a launcher started by pwsh
+            // may inherit its incompatible PSModulePath in Windows PowerShell.
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $a=[System.IO.Directory]::GetAccessControl($env:ORBISYNC_PRIVATE_DIR); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if ($a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 1 }; foreach($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($r.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $r.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } }; exit 0"])
+            .env_remove("PSModulePath")
             .env("ORBISYNC_PRIVATE_DIR", path).creation_flags(0x08000000).output()?;
         if !check.status.success() {
             return Err(std::io::Error::other(
@@ -835,3 +875,5 @@ fn open_browser(url: &str) {
             .spawn();
     }
 }
+
+include!("web_admin_local.rs");

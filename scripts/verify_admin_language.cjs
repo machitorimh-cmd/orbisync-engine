@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'apps/admin-web/index.html'), 'utf8');
 const js = fs.readFileSync(path.join(root, 'apps/admin-web/src/main.js'), 'utf8');
+const connectionJs = fs.readFileSync(path.join(root, 'apps/admin-web/src/local_connection.js'), 'utf8');
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
@@ -16,11 +17,14 @@ const js = fs.readFileSync(path.join(root, 'apps/admin-web/src/main.js'), 'utf8'
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let initialized = false, apiCalls = 0;
+    const authHeaders = [];
     await context.route('https://admin.test/**', async route => {
       const url = new URL(route.request().url()), p = url.pathname;
       if (p === '/') return route.fulfill({ contentType: 'text/html', body: html });
       if (p === '/admin.js') return route.fulfill({ contentType: 'text/javascript', body: js });
+      if (p === '/admin-connection.js') return route.fulfill({ contentType: 'text/javascript', body: connectionJs });
       apiCalls++;
+      authHeaders.push({ pathname: p, authorization: route.request().headers().authorization ?? null });
       let data;
       if (p === '/admin/status') data = { initialized, ready: initialized, engine: initialized ? 'running' : 'not started', restart_required: true };
       else if (p === '/admin/initialize') { initialized = true; data = { temporary_password: 'temporary-fixture-secret', message: 'Initialized. Save the one-time password, start the engine, then sign in and change it.' }; }
@@ -33,12 +37,15 @@ const js = fs.readFileSync(path.join(root, 'apps/admin-web/src/main.js'), 'utf8'
       else if (p.endsWith('/worlds')) data = { items: [{ id: 'w1', name: 'World', status: 'active' }], next_cursor: null };
       else if (p.endsWith('/instances')) data = { items: [{ id: 'i1', world_id: 'w1', status: 'running' }], next_cursor: null };
       else if (p === '/admin/check') return route.fulfill({ status: 400, json: { message: 'database.url: RAW diagnostic 日本語 / 42' } });
+      else if (p === '/admin/probe') data = { ok: true, checks: ['http', 'websocket', 'join', 'sync'].map(step => ({ step, status: 'passed' })) };
       else throw new Error(`Unexpected fixture request ${p}`);
       return route.fulfill({ json: data });
     });
     await page.goto('https://admin.test/#fixture-capability');
     await expect(page.locator('html')).toHaveAttribute('lang', 'ja');
     await expect(page.locator('#setup')).toBeVisible();
+    await expect(page.locator('#startLocalTrial')).toHaveText('このPCで試す');
+    await page.locator('#manualSetup > summary').click();
     await expect(page.locator('h1')).toHaveText('エンジン管理');
     await page.locator('#setupForm button[type=submit]').click();
     assert.equal(await page.locator('#databaseUrl').evaluate(el => el.validationMessage), '値を入力してください。');
@@ -65,6 +72,8 @@ const js = fs.readFileSync(path.join(root, 'apps/admin-web/src/main.js'), 'utf8'
     await page.locator('#loginForm button').click();
     await expect(page.locator('#usersTable')).toContainText('有効');
     await expect(page.locator('#signedIn')).toHaveText('ログイン中: Users (operator)');
+    await page.locator('#refreshStatus').click();
+    assert.equal(authHeaders.filter(call => call.pathname === '/admin/status').at(-1).authorization, null, 'Signed-in status refresh must not carry an engine token');
     await page.locator('#newLogin').fill('unsaved-user');
     await page.locator('#currentPassword').fill('old-fixture-password');
     await page.locator('#newPassword').fill('short');
@@ -112,6 +121,8 @@ const js = fs.readFileSync(path.join(root, 'apps/admin-web/src/main.js'), 'utf8'
     await expect(page.locator('#replacementDb')).toHaveValue('replacement-fixture');
     await expect(page.locator('#configFields input').first()).toHaveValue('127.0.0.1:8888');
     await expect(page.locator('[data-tab=config]')).toHaveAttribute('aria-selected', 'true');
+    assert.ok(authHeaders.some(call => call.pathname === '/admin/settings' && call.authorization === 'Bearer fixture-only'));
+    assert.ok(authHeaders.some(call => call.pathname === '/api/v1/users' && call.authorization === 'Bearer fixture-only'));
     await page.locator('#language').selectOption('en');
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('lang', 'en');
@@ -119,7 +130,10 @@ const js = fs.readFileSync(path.join(root, 'apps/admin-web/src/main.js'), 'utf8'
     await context.close();
     for (const locale of ['en-US', 'fr-FR']) {
       const fresh = await browser.newContext({ locale });
-      await fresh.route('https://admin.test/**', route => route.fulfill({ contentType: route.request().url().endsWith('admin.js') ? 'text/javascript' : 'text/html', body: route.request().url().endsWith('admin.js') ? js : html }));
+      await fresh.route('https://admin.test/**', route => {
+        const name = new URL(route.request().url()).pathname;
+        return route.fulfill({ contentType: name.endsWith('.js') ? 'text/javascript' : 'text/html', body: name === '/admin.js' ? js : name === '/admin-connection.js' ? connectionJs : html });
+      });
       const tab = await fresh.newPage();
       await tab.goto('https://admin.test/');
       await expect(tab.locator('html')).toHaveAttribute('lang', 'en');

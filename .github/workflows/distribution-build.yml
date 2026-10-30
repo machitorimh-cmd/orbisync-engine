@@ -1,0 +1,109 @@
+name: Build consumer distributions
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: v0.0.0-ci
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: Bundle and consumer smoke (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: orbisync-server
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            executable: orbisync-server.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: distribution-${{ matrix.target }}
+      - name: Install pinned build tools (never consumer prerequisites)
+        run: python -m pip install meson==1.9.1 ninja==1.13.0
+      - name: Linux build requirements
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential flex bison perl pkg-config
+      - name: Windows build requirements and MSVC environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC x64 build tools not found' }
+          $setup = "`"$vs/Common7/Tools/VsDevCmd.bat`" -no_logo -arch=x64 -host_arch=x64 >nul && set"
+          & cmd.exe /d /s /c $setup | ForEach-Object {
+            if ($_ -match '^(PATH|INCLUDE|LIB|LIBPATH)=(.*)$') { $_ | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          }
+          'RUSTFLAGS=-C target-feature=+crt-static' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build and relocate-smoke pinned PostgreSQL 17.11
+        run: python scripts/build_postgres_runtime.py --target ${{ matrix.target }} --output target/postgres-runtime --jobs 4
+      - name: Build the self-contained server
+        run: cargo build --locked --release -p orbisync-server --target ${{ matrix.target }}
+      - name: Package with verified PostgreSQL runtime
+        shell: python
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+          PACKAGE_TARGET: ${{ matrix.target }}
+          PACKAGE_EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable, 'scripts/package_server.py', '--binary',
+            f"target/{os.environ['PACKAGE_TARGET']}/release/{os.environ['PACKAGE_EXECUTABLE']}",
+            '--postgres-runtime', 'target/postgres-runtime', '--target', os.environ['PACKAGE_TARGET'],
+            '--version', os.environ['PACKAGE_VERSION'], '--source-commit', os.environ['GITHUB_SHA'],
+            '--output', 'target/distribution'], check=True)
+      - name: Extract the actual archive for the consumer smoke
+        shell: python
+        run: |
+          import pathlib, shutil
+          archives = list(pathlib.Path('target/distribution').glob('*.zip')) + list(pathlib.Path('target/distribution').glob('*.tar.gz'))
+          assert len(archives) == 1
+          shutil.unpack_archive(str(archives[0]), 'target/consumer-extracted')
+      - name: Managed database consumer setup, real protocol probe and persistent restart
+        shell: python
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+          PACKAGE_TARGET: ${{ matrix.target }}
+        run: |
+          import os, subprocess, sys
+          platform = 'windows-x86_64' if os.name == 'nt' else 'linux-x86_64'
+          bundle = f"target/consumer-extracted/orbisync-{os.environ['PACKAGE_VERSION']}-{platform}"
+          subprocess.run([sys.executable, 'scripts/smoke_distribution.py', '--bundle', bundle,
+            '--target', os.environ['PACKAGE_TARGET']], check=True)
+      - name: Managed installation recovery, port repair and private state regression
+        shell: python
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+        run: |
+          import os, subprocess, sys
+          platform = 'windows-x86_64' if os.name == 'nt' else 'linux-x86_64'
+          executable = 'orbisync-server.exe' if os.name == 'nt' else 'orbisync-server'
+          binary = f"target/consumer-extracted/orbisync-{os.environ['PACKAGE_VERSION']}-{platform}/{executable}"
+          subprocess.run([sys.executable, 'scripts/verify_local_trial_recovery.py', '--binary', binary], check=True)
+      - name: Upload only verified public distribution files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: orbisync-bundle-${{ matrix.target }}
+          path: |
+            target/distribution/*.zip
+            target/distribution/*.tar.gz
+            target/distribution/*.sha256
+          if-no-files-found: error
+          retention-days: 14

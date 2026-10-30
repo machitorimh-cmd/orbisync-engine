@@ -1,7 +1,38 @@
 # Engine Web setup and administration
 
-The real UI is embedded in the Rust executable. Consumers need PostgreSQL and
-`orbisync-server`, with no Node or frontend build toolchain.
+The real UI is embedded in the Rust executable. The consumer distribution bundles
+PostgreSQL and needs no database installation, Docker, Node, SDK generation, or
+frontend build toolchain. An external PostgreSQL connection is an optional manual mode.
+
+## Start a local trial
+
+Extract the complete distribution and open `start-web-admin.cmd` (Windows) or
+`start-web-admin.sh` (Linux). On Windows the bundled executable also opens this
+launcher when started without arguments. Choose **Try on this computer**.
+The launcher prepares its private PostgreSQL cluster, runs the stock migrations,
+creates local credentials, starts the engine and signs in. The first generated
+administrator password is displayed once. The real connection test checks HTTP
+authentication, WebSocket negotiation, instance admission and canonical initial
+state; it creates one reusable diagnostic World/Instance in this local trial.
+No sample application or SDK build is needed.
+
+Use **Stop**, **Start engine**, or **Restart** to control both owned processes.
+Settings and database contents remain in the private installation directory.
+Reopen the launcher and choose **Resume local trial** to use the saved environment.
+Diagnostic actions can retry an interrupted setup or choose a new engine/database
+port. No unrelated service is stopped. If the administration port is occupied,
+the launcher opens another available loopback port automatically.
+
+The private `local-postgres` directory belongs to the launcher. It holds the
+PostgreSQL data and its separate migration/runtime credentials. They are not
+returned by diagnostics. Parent-to-engine shutdown uses a private stdin pipe;
+ordinary graceful drain completes before the owned database stops. Requests to
+the engine verify its per-launch HMAC ownership proof before using credentials.
+
+Local trial initialization can be retried from the UI after interruption. Incomplete
+pre-configuration files are archived privately only when the owned trial database
+is still empty. Existing databases are never reset. The connection probe is disabled
+for manual/existing installations and never seeds their data.
 
 ## Display language
 
@@ -32,7 +63,7 @@ If Playwright is installed elsewhere, set `PLAYWRIGHT_MODULE` to that existing
 `@playwright/test` module path. The check uses fixed API responses and actual
 browser controls; it does not verify backend authorization or recovery.
 
-## First start
+## Manual database setup and source development
 
 From the repository root on Windows or Linux:
 

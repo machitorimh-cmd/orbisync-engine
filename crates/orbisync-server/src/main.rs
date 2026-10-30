@@ -58,6 +58,7 @@ use orbisync_transport_http::{HttpState, router};
 mod admin_password_recovery;
 mod checkpoint_operator_cli;
 mod doctor;
+mod local_postgres;
 mod operational_diagnostics;
 mod periodic_tasks;
 mod retention;
@@ -566,6 +567,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Serve a launcher-owned engine until its private stdin pipe closes.
+    #[command(hide = true)]
+    ManagedServe,
     /// Recover an existing active administrator using local installation/DB operator access.
     ResetAdminPassword {
         /// Exact existing administrator login identifier (never creates an account).
@@ -697,6 +701,20 @@ fn log_startup_failure(error: &ServerError) {
 
 fn run() -> Result<std::process::ExitCode, ServerError> {
     let cli = Cli::parse();
+    if std::env::args_os().len() == 1
+        && Config::discover_path(None, &SystemEnv::new())?.is_none()
+        && SystemEnv::new()
+            .get(&Config::default().database.url_env)
+            .is_none()
+    {
+        let executable = std::env::current_exe().map_err(ServerError::BootstrapIo)?;
+        if let Some(directory) = executable.parent()
+            && directory.join("runtime/postgres/BUILD.json").is_file()
+        {
+            return web_admin::run(&directory.join(".orbisync-admin"), 8090, false, None)
+                .map(|()| std::process::ExitCode::SUCCESS);
+        }
+    }
     if let Some(Command::WebAdmin {
         data_dir,
         port,
@@ -741,6 +759,7 @@ fn run() -> Result<std::process::ExitCode, ServerError> {
 }
 
 fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
+    let managed_shutdown = matches!(cli.command, Some(Command::ManagedServe));
     let config_path = Config::discover_path(cli.config.as_deref(), &env)?;
     let loaded = Config::load(config_path.as_deref(), &env, &cli.overrides())?;
     let config = loaded.config;
@@ -848,7 +867,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 Ok(())
             }
             Command::Doctor { .. } => Ok(()),
-            Command::Serve => {
+            Command::Serve | Command::ManagedServe => {
                 let shutdown = Arc::new(ShutdownState::new());
                 let path = password_denylist
                     .as_deref()
@@ -1848,6 +1867,14 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                     )
                     .with_state(Arc::clone(&realtime_state));
                 let app = http_router.merge(ws_router);
+                let app = if managed_shutdown {
+                    let proof = env.get("ORBISYNC_LOCAL_ENGINE_PROOF").filter(|value|value.len()>=32)
+                        .ok_or_else(|| orbisync_application::ApplicationError::port_failure("managed launcher proof unavailable"))?;
+                    app.route("/health/local-owner", axum::routing::get(move |headers: axum::http::HeaderMap| {
+                        let proof=proof.clone();
+                        async move { managed_owner_proof(&headers,&proof) }
+                    }))
+                } else {app};
                 let listener = tokio::net::TcpListener::bind(&config.server.bind)
                     .await
                     .map_err(ServerError::Listener)?;
@@ -1874,6 +1901,7 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                     runtime_workers,
                     config.server.shutdown_drain_timeout_seconds,
                     Arc::clone(&shutdown_failed),
+                    managed_shutdown,
                 ))
                 .await
                 .map_err(ServerError::Listener)?;
@@ -2369,6 +2397,56 @@ async fn persist_instance_checkpoint(
         .map(|_| ())
 }
 
+fn managed_owner_proof(headers: &axum::http::HeaderMap, secret: &str) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    let Some(challenge) = headers
+        .get("x-orbisync-challenge")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    if !base64::engine::general_purpose::STANDARD
+        .decode(challenge)
+        .is_ok_and(|bytes| bytes.len() == 32)
+    {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+    let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()) else {
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    mac.update(challenge.as_bytes());
+    let proof = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    (
+        axum::http::StatusCode::NO_CONTENT,
+        [
+            ("x-orbisync-launcher-proof", proof),
+            ("cache-control", "no-store".to_owned()),
+        ],
+    )
+        .into_response()
+}
+
+async fn wait_for_engine_shutdown(managed: bool) {
+    if !managed {
+        wait_for_signal().await;
+        return;
+    }
+    // The local launcher's anonymous pipe is never a network control endpoint.
+    // Closing it (including parent process death) requests the ordinary drain.
+    use tokio::io::AsyncReadExt as _;
+    let pipe_closed = async {
+        let mut input = tokio::io::stdin();
+        let mut buffer = [0_u8; 32];
+        while input.read(&mut buffer).await.is_ok_and(|read| read != 0) {}
+    };
+    tokio::select! {
+        () = pipe_closed => {},
+        () = wait_for_signal() => {},
+    }
+}
+
 async fn wait_for_signal() {
     let ctrl_c = async {
         if tokio::signal::ctrl_c().await.is_err() {
@@ -2412,14 +2490,15 @@ async fn shutdown_signal(
     runtime_workers: Option<runtime_maintenance::RuntimeWorkers>,
     drain_timeout_seconds: u64,
     failed: Arc<std::sync::atomic::AtomicBool>,
+    managed: bool,
 ) {
     if let Some(service) = &realtime.generation {
         tokio::select! {
-            () = wait_for_signal() => {},
+            () = wait_for_engine_shutdown(managed) => {},
             () = async { while service.ready() { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {},
         }
     } else {
-        wait_for_signal().await;
+        wait_for_engine_shutdown(managed).await;
     }
     let _clock_delivered = entered.send(tokio::time::Instant::now());
     tracing::info!(event = "server.shutdown_requested");

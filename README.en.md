@@ -12,7 +12,11 @@ This README describes the current source and configuration in the OSS repository
 
 ## Prebuilt server
 
-[GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.1) provides a Windows x64 ZIP and a Linux x86_64 tar.gz. Rust and Node.js are unnecessary; PostgreSQL is required separately. Each archive includes Japanese/English startup guides, a launcher, project licenses, and dependency licenses. Checksums are in `SHA256SUMS.txt`. [Usage guide](deploy/distribution/README.en.md)
+Extract the Windows x64 ZIP or Linux x86_64 tar.gz from [GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2), then open `start-web-admin.cmd` or `start-web-admin.sh`. On Windows the bundled executable also opens the launcher directly. Choose **Try on this PC** to prepare the bundled PostgreSQL, initialize the installation, start the engine, and test a real connection. **No Rust, Node.js, Docker, database installation, or connection URL is required.**
+
+The administration screen stops, starts, and restarts both owned processes while preserving settings and data. Diagnostic actions retry setup or select free ports. The connection probe verifies HTTP authentication, WebSocket negotiation, instance admission, and initial synchronization. Local trials remain bound to this computer's loopback interface; manual external database setup is also available.
+
+Archives include bilingual startup guides, launchers, PostgreSQL binaries/source/license, and dependency licenses. Checksums are in `SHA256SUMS.txt`. [Usage guide](deploy/distribution/README.en.md)
 
 ## Implementation status
 

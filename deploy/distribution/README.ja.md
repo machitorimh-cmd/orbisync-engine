@@ -2,7 +2,7 @@
 
 **日本語** | [English](README.en.md)
 
-RustやNode.jsをインストールせず、同梱サーバーとブラウザ管理画面を使うためのパッケージです。開発中のプレビュー版です。PostgreSQLは同梱していません。空のPostgreSQLデータベースを別途用意してください。管理画面の初期化はmigration・管理者作成を行うため、既存の大切なDBを指定しないでください。
+ダウンロード・展開して起動すると、同梱サーバーとブラウザ管理画面を試せるパッケージです。PostgreSQL 17.11 の実行環境も含まれます。ローカル試用には Rust、Node.js、Docker、PostgreSQL の別途インストールや DB 接続URLの入力は不要です。開発中のプレビュー版です。
 
 ## Windows x64
 
@@ -12,17 +12,17 @@ ZIPを一般ユーザーが書き込める専用フォルダへ展開し、`star
 .\orbisync-server.exe web-admin
 ```
 
-ブラウザが開かない場合は、端末に表示されたプライベートURLを開いてください。署名付きインストーラーではありません。ダウンロード元とSHA-256を確認してください。Microsoft Visual C++ランタイムのDLL不足が表示された場合は、Microsoft公式のVisual C++ v14 x64 Redistributableを導入してください。
+ブラウザが開かない場合は、端末に表示されたプライベートURLを開いてください。Windows x64 用で、CI の配布テストは Windows Server 2022 を対象にしています。C/C++ ランタイムを静的リンクした配布物を使用するため、Visual C++ Redistributable の追加インストールは不要です。署名付きインストーラーではないため、ダウンロード元とSHA-256を確認してください。
 
 ## Linux x86_64
 
-glibcを使うLinux用です。Alpineのmusl環境やARM64向けではありません。必要なglibcバージョンと動作確認環境はリリースノートを参照してください。システムのCA証明書と `libgcc_s.so.1` も必要です。
+Ubuntu 22.04 のビルドを基準とする glibc 2.35 以降の x86_64 Linux 用です。Alpineのmusl環境やARM64向けではありません。通常の OS ライブラリ（`libgcc_s.so.1` 等）を使用し、外部 HTTPS 接続にはシステムの CA 証明書を使用します。DB は root では起動できないため、一般ユーザーで実行してください。確認済み環境はリリースノートも参照してください。
 
 アーカイブを一般ユーザーが所有する書込み可能な専用フォルダへ展開します。
 
 ```sh
-tar -xzf orbisync-v0.1.0-preview.1-linux-x86_64.tar.gz
-cd orbisync-v0.1.0-preview.1-linux-x86_64
+tar -xzf orbisync-v0.1.0-preview.2-linux-x86_64.tar.gz
+cd orbisync-v0.1.0-preview.2-linux-x86_64
 ./start-web-admin.sh
 ```
 
@@ -36,14 +36,16 @@ cd orbisync-v0.1.0-preview.1-linux-x86_64
 
 ## 初回設定
 
-1. 空のPostgreSQL DBの接続URLを入力し、接続を確認します。
-2. 実ユーザーが利用する場合は、運用者が選定した10,000件のパスワードdenylistを指定します。一時的なローカル試用だけなら **Local development** を明示選択できます。生成されるプレースホルダーは一般的な実パスワードを防ぎません。
-3. 管理者のログインID・表示名を入力し、初期化します。鍵とmigrationが準備されます。一度だけ表示される初期パスワードを安全に保存します。
-4. **Start engine** で起動し、準備完了後にログインします。初期パスワードを変更し、再ログインしてください。
+1. 管理画面の **このPCで試す** を押します。同梱 DB の準備、migration、管理者作成、エンジンの起動を順に実行します。
+2. 準備完了後は自動で管理画面へログインし、HTTP / WebSocket / 参加 / 同期の接続テストを表示します。一度だけ表示される管理者パスワードを安全に保存してください。
+3. 停止・起動・再起動は画面のボタンから操作できます。同じインストールフォルダを開くと DB と設定を再利用し、初期化し直しません。
+4. 問題が出た場合は診断の案内に従います。ポート変更は画面から明示的に選択でき、無関係なプロセスを停止する必要はありません。
 
-ヘッダーで日本語 / Englishを切り替えられます。既定の管理ポートは8090、エンジンは8080です。ポートが使用中の場合は既存プロセスを停止せず、設定を変更してください。
+ローカル試用では一時的な開発用パスワードポリシーを使用します。実利用者向けの運用では、手動設定から運用者が選定した10,000件の denylist 等を設定してください。外部 PostgreSQL を使用する従来の手動設定も残っています。手動初期化は migration・管理者作成を行うため、既存の大切な DB を指定しないでください。
 
-ランチャーはパッケージのフォルダを作業ディレクトリにします。設定と秘密情報は既定で `.orbisync-admin/` に保存されます。再起動には同じフォルダで同じランチャーを使います。別の保存先には `--data-dir` を指定できます。終了は端末のCtrl+Cです。バックアップはDBとこの設定ディレクトリを安全に保管してください。認証情報入りディレクトリを再配布ZIPやGitへ追加しないでください。
+ヘッダーで日本語 / Englishを切り替えられます。管理画面は8090を優先し、使用中なら空きポートを選びます。ローカル試用のDBとエンジンも空きポートを選び、選んだ設定を保存します。次回起動時に競合した場合は、診断画面のポート変更を使ってください。
+
+ランチャーはパッケージのフォルダを作業ディレクトリにします。設定・秘密情報・ローカル DB は既定で `.orbisync-admin/` に保存され、DB 本体はその中の `local-postgres/data/` に置かれます。再起動には同じフォルダで同じランチャーを使います。別の保存先には `--data-dir` を指定できます。終了は端末のCtrl+Cです。バックアップはDBとこの設定ディレクトリを安全に保管してください。使用中の DB ファイルをコピーするだけでは整合したバックアップになりません。認証情報入りディレクトリを再配布ZIPやGitへ追加しないでください。
 
 このローカルWebランチャーは公開ネットワーク用のサービス構成を自動作成しません。通常の `serve`、既存環境、復旧、TLSなどは[Web管理ガイド](https://github.com/machitorimh-cmd/orbisync-engine/blob/main/apps/admin-web/README.md)を参照してください。
 
@@ -52,6 +54,10 @@ cd orbisync-v0.1.0-preview.1-linux-x86_64
 - `orbisync-server[.exe]`: 管理UIとDB migrationを含むサーバー
 - `start-web-admin.cmd` または `start-web-admin.sh`: 起動用スクリプト
 - `BUILD.json`: ソースcommit、target、Rustバージョン、バイナリSHA-256
+- `runtime/postgres/`: PostgreSQL の実行ファイル・標準モジュール・初期化データ・タイムゾーンデータ
+- `runtime/postgres/BUILD.json` / `SHA256SUMS`: 固定したソースURL・SHA-256、ビルド条件、依存 DLL/ライブラリ確認、全 runtime ファイルのチェックサム
+- `runtime/postgres/LICENSE` / `source/`: PostgreSQL ライセンスと、関連する著作権・ライセンス通知を含む検証済み公式ソース一式
+- `SHA256SUMS`: 展開後の同梱ファイルのチェックサム
 - `LICENSE-MIT` / `LICENSE-APACHE`: OrbiSyncのライセンス
 - `THIRD-PARTY.json` / `third-party-licenses/`: 依存crateのライセンスと通知
 

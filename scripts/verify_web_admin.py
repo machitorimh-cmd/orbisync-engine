@@ -55,12 +55,12 @@ class Launcher:
                 return
             if self.process.poll() is not None:
                 self.close()
-                raise AssertionError("Launcher failed before URL; " + text[-500:])
+                raise AssertionError("launcher_start_failed")
             time.sleep(.1)
         self.close()
         raise AssertionError("Launcher did not become available")
 
-    def call(self, path, method="GET", body=None, expected=200, overrides=None):
+    def call(self, path, method="GET", body=None, expected=200, overrides=None, timeout=40):
         headers = {"x-orbisync-local": self.capability, "Origin": self.url}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
@@ -72,11 +72,22 @@ class Launcher:
             headers.update(overrides)
         request = urllib.request.Request(self.url + path, data=None if body is None else json.dumps(body).encode(), method=method, headers=headers)
         try:
-            response = urllib.request.urlopen(request, timeout=40)
+            response = urllib.request.urlopen(request, timeout=timeout)
         except urllib.error.HTTPError as error:
             response = error
         data = response.read()
-        assert response.status == expected, f"{method} {path}: expected {expected}, got {response.status}: {data[:300]!r}"
+        # Authentication/setup responses may contain one-time credentials.
+        # Never include response bytes in assertion output.
+        if response.status != expected:
+            code = "unexpected_response"
+            try:
+                parsed = json.loads(data)
+                candidate = parsed.get("code") or parsed.get("error", {}).get("code")
+                if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_]+", candidate):
+                    code = candidate
+            except (ValueError, AttributeError):
+                pass
+            raise AssertionError(f"http_{response.status}_{code}")
         assert response.headers.get("Cache-Control") == "no-store" or expected == 403
         return json.loads(data) if data else None
 
@@ -114,6 +125,12 @@ def main():
         try:
             app = Launcher(binary, directory, root / "first.log")
             children.append(app)
+            # Both embedded browser modules are available without a frontend
+            # toolchain or launch capability; API mutations still require it.
+            asset = urllib.request.urlopen(app.url + "/admin-connection.js", timeout=10)
+            assert asset.status == 200
+            assert asset.headers.get("Cache-Control") == "no-store"
+            assert b"createLocalConnection" in asset.read()
             assert not app.call("/admin/status")["initialized"]
             app.call("/admin/status", expected=403, overrides={"x-orbisync-local": "invalid"})
             app.call("/admin/status", expected=403, overrides={"Origin": "https://foreign.example"})
@@ -138,6 +155,20 @@ def main():
             app.call("/api/v1/auth/me", expected=401)
             app.login("operator", "Cedar!River7-Cosmos")
             app.call("/api/v1/auth/administration-access", expected=204)
+            diagnostics = app.call("/admin/diagnostics")
+            assert diagnostics["checks"], "Diagnostics must report bounded checks"
+            assert all(re.fullmatch(r"[a-z0-9_]+", check["code"]) for check in diagnostics["checks"])
+            assert all(check["status"] in {"passed", "failed", "skipped"} for check in diagnostics["checks"])
+            assert db not in json.dumps(diagnostics)
+            assert initial_password not in json.dumps(diagnostics)
+            # Full probes seed only the explicitly managed disposable trial.
+            # Ordinary manually configured databases retain their contents.
+            before_probe = app.call("/api/v1/worlds")["items"]
+            probe = app.call("/admin/probe", "POST", {})
+            assert not probe["ok"]
+            assert probe["checks"][0] == {"step": "http", "status": "failed", "code": "probe_requires_local_trial"}
+            assert any(check.get("code") == "probe_requires_local_trial" for check in probe["checks"])
+            assert app.call("/api/v1/worlds")["items"] == before_probe
             user = app.call("/api/v1/users", "POST", {"login_id": "member", "display_name": "Member"}, expected=201, overrides={"Accept": "application/vnd.orbisync.user-credential+json"})
             uid = user["user"]["id"]
             app.call(f"/api/v1/users/{uid}/disable", "POST")
@@ -157,6 +188,16 @@ def main():
             app.call("/admin/settings", "POST", edit)
             assert app.call("/admin/status")["restart_required"]
             saved = (directory / "orbisync.toml").read_bytes()
+            app.call("/admin/stop", "POST", {})
+            stopped = app.call("/admin/status")
+            assert not stopped["ready"] and stopped["engine"] == "stopped"
+            app.start()
+            app.call("/admin/restart", "POST", {})
+            assert app.call("/admin/status")["ready"]
+            assert not app.call("/admin/status")["restart_required"]
+            assert (directory / "orbisync.toml").read_bytes() == saved
+            assert any(item["id"] == uid for item in app.call("/api/v1/users")["items"])
+            assert any(item["id"] == world["id"] for item in app.call("/api/v1/worlds")["items"])
             operator_token = app.token
             app.login("member", user["temporary_password"])
             app.call("/admin/settings", expected=403)
@@ -181,7 +222,7 @@ def main():
             other.call("/admin/initialize", "POST", setup, expected=400)
             assert not (root / "other" / "orbisync.toml").exists()
             assert (directory / "orbisync.toml").read_bytes() == saved
-            print("PASS: setup, origin/capability guards, password change/login, users/roles, instance start/stop, config validation, restart persistence, RBAC/session revocation, existing database preservation", flush=True)
+            print("PASS: setup, embedded browser module, origin/capability guards, password change/login, users/roles, instance start/stop, secret-safe diagnostics, manual DB probe non-seeding, engine stop/start/restart with data preservation, config validation, restart persistence, RBAC/session revocation, existing database preservation", flush=True)
         finally:
             for app in reversed(children):
                 app.close()
