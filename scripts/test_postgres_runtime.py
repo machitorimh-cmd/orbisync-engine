@@ -7,12 +7,14 @@ import tarfile
 import tempfile
 import subprocess
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from scripts import build_postgres_runtime as builder
 from scripts import package_server
 from scripts import postgres_runtime as runtime
 from scripts import private_fixture
+from scripts import smoke_distribution
 
 
 class RuntimeIntegrityTests(unittest.TestCase):
@@ -208,6 +210,28 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(build["postgresql"]["source"]["sha256"], runtime.SOURCE_SHA256)
         self.assertIn("runtime/postgres/SHA256SUMS", (bundle / "SHA256SUMS").read_text())
         self.assertEqual(len(list(output.glob("*.zip"))), 1)
+
+
+class ConsumerDiagnosticTests(unittest.TestCase):
+    def failure(self, body):
+        error = urllib.error.HTTPError("http://localhost/?token=URL_SECRET", 400, "REASON_SECRET", {}, io.BytesIO(body))
+        return str(smoke_distribution._http_failure("/admin/local-trial", error))
+
+    def test_only_bounded_public_code_is_exposed_from_secret_containing_response(self):
+        body = json.dumps({"code": "private_storage", "message": "MESSAGE_SECRET",
+                           "initial_password": "PASSWORD_SECRET", "access_token": "TOKEN_SECRET"}).encode()
+        self.assertEqual(self.failure(body), "consumer request /admin/local-trial returned HTTP 400 (code=private_storage)")
+        self.assertEqual(self.failure(json.dumps({"code": "A" * 80}).encode()),
+                         "consumer request /admin/local-trial returned HTTP 400 (code=" + "A" * 80 + ")")
+
+    def test_invalid_code_and_non_json_response_are_not_exposed(self):
+        for code in ("", "A" * 81, "URL/SECRET", "line\nSECRET", "日本語", "invalid-code", None, 400, ["SECRET"], {"SECRET": True}):
+            with self.subTest(code=code):
+                self.assertEqual(self.failure(json.dumps({"code": code, "message": "BODY_SECRET"}).encode()),
+                                 "consumer request /admin/local-trial returned HTTP 400")
+        for body in (b"BODY_SECRET", b"[]", b"{\"code\":", b"x" * 20_000, b"\xff"):
+            with self.subTest(body_type=type(body).__name__):
+                self.assertEqual(self.failure(body), "consumer request /admin/local-trial returned HTTP 400")
 
 
 if __name__ == "__main__":

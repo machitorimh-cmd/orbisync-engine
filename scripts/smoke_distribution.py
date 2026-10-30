@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
@@ -17,6 +18,20 @@ if __package__:
 else:
     import postgres_runtime
     from private_fixture import private_temporary_directory
+
+
+def _http_failure(route, error):
+    message = f"consumer request {route} returned HTTP {error.code}"
+    try:
+        payload = json.loads(error.read(16_384))
+    except (ValueError, OSError):
+        payload = None
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_]{1,80}", code):
+        message += f" (code={code})"
+    # Error URLs, reason strings, message fields and all other response data
+    # can contain credentials. Only the bounded public code is emitted.
+    return RuntimeError(message)
 
 
 def smoke(bundle, target):
@@ -64,7 +79,7 @@ def smoke(bundle, target):
                         with opener.open(req, timeout=120) as response:
                             return json.load(response)
                     except urllib.error.HTTPError as error:
-                        raise RuntimeError(f"consumer request {route} returned HTTP {error.code}") from None
+                        raise _http_failure(route, error) from None
                 setup = request("/admin/local-trial", {})
                 if setup.get("ok") is not True or not setup.get("access_token"):
                     raise RuntimeError("consumer local trial did not initialize and authenticate")

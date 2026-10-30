@@ -34,6 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: distribution-${{ matrix.target }}
+          cache-on-failure: true
       - name: Install pinned build tools (never consumer prerequisites)
         run: python -m pip install meson==1.9.1 ninja==1.13.0
       - name: Linux build requirements

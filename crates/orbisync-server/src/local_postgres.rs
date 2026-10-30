@@ -156,6 +156,8 @@ pub(super) struct LocalPostgres {
     running: Option<Running>,
     stage: &'static str,
     path_encodings: std::sync::Mutex<Vec<Vec<u8>>>,
+    #[cfg(all(test, windows))]
+    force_restricted_start: bool,
 }
 
 impl std::fmt::Debug for LocalPostgres {
@@ -264,6 +266,8 @@ impl LocalPostgres {
             running: None,
             stage: "stopped",
             path_encodings: std::sync::Mutex::new(Vec::new()),
+            #[cfg(all(test, windows))]
+            force_restricted_start: false,
         })
     }
 
@@ -357,6 +361,11 @@ impl LocalPostgres {
             .map_err(|_| LocalPostgresError::PortInUse)?;
         self.write_configuration()?;
         self.stage = "starting";
+        #[cfg(windows)]
+        if self.windows_restricted_start_required()? {
+            drop(reservation);
+            return self.start_windows_restricted().await;
+        }
         let mut command = self.command("postgres");
         command.arg("-D").arg(&self.data);
         drop(reservation);
@@ -398,6 +407,57 @@ impl LocalPostgres {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        self.stage = "provisioning";
+        self.provision().await?;
+        Ok(self.manifest.application_url())
+    }
+
+    #[cfg(windows)]
+    fn windows_restricted_start_required(&self) -> Result<bool, LocalPostgresError> {
+        #[cfg(test)]
+        if self.force_restricted_start {
+            return Ok(true);
+        }
+        use std::os::windows::process::CommandExt as _;
+        // Match PostgreSQL's pgwin32_is_admin: either enabled group requires
+        // the official restricted-token startup, including Power Users.
+        let status = Command::new(windows_powershell()?)
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; $p=[System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent()); if ($p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator) -or $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::PowerUser)) { exit 0 }; exit 3"])
+            .env_remove("PSModulePath").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .creation_flags(0x08000000).status().map_err(|_| LocalPostgresError::StartFailed)?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(3) => Ok(false),
+            _ => Err(LocalPostgresError::StartFailed),
+        }
+    }
+
+    #[cfg(windows)]
+    async fn start_windows_restricted(&mut self) -> Result<String, LocalPostgresError> {
+        // PostgreSQL refuses an elevated direct CreateProcess launch. pg_ctl
+        // creates a restricted token itself, and its transient PID belongs to
+        // an ancestor CMD process, so never treat that PID as the server's.
+        let mut command = self.command("pg_ctl");
+        command
+            .arg("start")
+            .arg("-D")
+            .arg(&self.data)
+            .args(["-w", "-t", "45"]);
+        if !run_command(command, START_TIMEOUT + Duration::from_secs(10))
+            .await?
+            .success()
+        {
+            return Err(LocalPostgresError::StartFailed);
+        }
+        // No control authority is assumed from pg_ctl success alone. Verify
+        // exact OS executable/-D, ready PID/start time, SQL directory/UUID/port.
+        let identity = self.adopted_identity()?;
+        let _verified = self.verified_connection().await?;
+        self.running = Some(Running {
+            child: None,
+            identity,
+        });
         self.stage = "provisioning";
         self.provision().await?;
         Ok(self.manifest.application_url())
@@ -860,7 +920,7 @@ impl LocalPostgres {
         {
             use std::os::windows::process::CommandExt as _;
             let output = Command::new(windows_powershell()?).args(["-NoProfile", "-NonInteractive", "-Command",
-                r#"$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter ('ProcessId = '+[uint32]$env:ORBISYNC_PG_PID); if ($null -eq $p -or $p.ExecutablePath -ne $env:ORBISYNC_PG_EXE) { exit 1 }; $e=$env:ORBISYNC_PG_EXE; $d=$env:ORBISYNC_PG_DATA; $forms=@(($e+' -D '+$d), ('"'+$e+'" -D '+$d), ($e+' -D "'+$d+'"'), ('"'+$e+'" -D "'+$d+'"')); if ($p.CommandLine.Trim() -notin $forms) { exit 1 }; exit 0"#])
+                r#"$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter ('ProcessId = '+[uint32]$env:ORBISYNC_PG_PID); if ($null -eq $p -or [System.IO.Path]::GetFullPath($p.ExecutablePath) -ne [System.IO.Path]::GetFullPath($env:ORBISYNC_PG_EXE)) { exit 1 }; $e=[regex]::Escape($env:ORBISYNC_PG_EXE.Replace('\','/')); $d=[regex]::Escape($env:ORBISYNC_PG_DATA.Replace('\','/')); $pattern='^(?:"'+$e+'"|'+$e+')\s+-D\s+(?:"'+$d+'"|'+$d+')$'; if ($p.CommandLine.Trim().Replace('\','/') -notmatch $pattern) { exit 1 }; exit 0"#])
                 .env("ORBISYNC_PG_PID", identity.pid.to_string()).env("ORBISYNC_PG_EXE", executable).env("ORBISYNC_PG_DATA", &self.data)
                 .env_remove("PSModulePath")
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x08000000).status()

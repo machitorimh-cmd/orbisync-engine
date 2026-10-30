@@ -314,8 +314,8 @@ async fn managed_postgres_real_runtime_lifecycle_permissions_and_explicit_repair
     assert_eq!(restored, "persist across restarts");
     app.close().await;
     // Simulate the launcher disappearing while PostgreSQL remains alive, but
-    // retain the actual Child handle in a test guard so even a failed assertion
-    // cannot leave a test process unowned.
+    // retain a direct Child handle in a test guard when available. Restricted
+    // Windows starts are already verified adopted processes without that handle.
     struct Detached(Child);
     impl Drop for Detached {
         fn drop(&mut self) {
@@ -323,7 +323,11 @@ async fn managed_postgres_real_runtime_lifecycle_permissions_and_explicit_repair
             let _reaped = self.0.wait();
         }
     }
-    let _detached = Detached(controller.running.as_mut().unwrap().child.take().unwrap());
+    let _detached = controller
+        .running
+        .as_mut()
+        .and_then(|running| running.child.take())
+        .map(Detached);
     drop(controller);
     let mut controller = LocalPostgres::open_with_runtime(&install, Path::new(&runtime)).unwrap();
     assert_eq!(controller.start().await.unwrap(), url);
@@ -352,4 +356,90 @@ async fn managed_postgres_real_runtime_lifecycle_permissions_and_explicit_repair
     );
     app.close().await;
     controller.stop().await.unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn managed_postgres_windows_restricted_start_is_verified_and_preserves_data() {
+    use futures_util::FutureExt as _;
+    let Some(runtime) = std::env::var_os("ORBISYNC_TEST_POSTGRES_RUNTIME") else {
+        eprintln!("restricted PostgreSQL runtime test requires ORBISYNC_TEST_POSTGRES_RUNTIME");
+        return;
+    };
+    let fixture = Fixture::new();
+    let install = fixture
+        .root
+        .join("restricted start 日本語 with  double spaces");
+    let mut controller = LocalPostgres::open_with_runtime(&install, Path::new(&runtime)).unwrap();
+    // This test-only field has no CLI/environment equivalent. Exercise the
+    // official pg_ctl path even on a normal non-elevated development machine.
+    controller.force_restricted_start = true;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let url = controller.start().await.unwrap();
+        assert!(
+            controller
+                .running
+                .as_ref()
+                .is_some_and(|running| running.child.is_none())
+        );
+        assert_eq!(controller.status().state, "ready");
+        let owner = sqlx::PgPool::connect(&controller.migration_database_url())
+            .await
+            .unwrap();
+        orbisync_storage_postgres::run_migrations(&owner)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE restricted_start_probe(value TEXT NOT NULL)")
+            .execute(&owner)
+            .await
+            .unwrap();
+        controller.grant_runtime_access().await.unwrap();
+        owner.close().await;
+        let application = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::query(
+            "INSERT INTO restricted_start_probe(value) VALUES ('survives restricted restart')",
+        )
+        .execute(&application)
+        .await
+        .unwrap();
+        application.close().await;
+        let first_identity = controller
+            .running
+            .as_ref()
+            .map(|running| running.identity.clone())
+            .unwrap();
+        controller.stop().await.unwrap();
+        assert!(controller.running.is_none());
+        assert_eq!(controller.start().await.unwrap(), url);
+        assert!(
+            controller
+                .running
+                .as_ref()
+                .is_some_and(|running| running.child.is_none())
+        );
+        let second_identity = controller
+            .running
+            .as_ref()
+            .map(|running| running.identity.clone())
+            .unwrap();
+        assert_ne!(second_identity, first_identity);
+        let application = sqlx::PgPool::connect(&url).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT value FROM restricted_start_probe")
+                .fetch_one(&application)
+                .await
+                .unwrap(),
+            "survives restricted restart"
+        );
+        application.close().await;
+    })
+    .catch_unwind()
+    .await;
+    // Clean up through the same verified stop even if an assertion failed.
+    let stopped = controller.stop().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    stopped.unwrap();
+    assert_eq!(controller.status().state, "stopped");
 }
