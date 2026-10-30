@@ -1,7 +1,14 @@
-"""Socket regressions for the local-trial recovery smoke's owned listeners."""
+"""Owned socket/process regressions for the local-trial recovery smoke."""
 import errno
+import os
+from pathlib import Path
+import queue
+import signal
 import socket
+import subprocess
 import sys
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -57,6 +64,52 @@ class RecoveryListenerTests(unittest.TestCase):
                 listen(12345)
             server.close.assert_called_once_with()
             server.listen.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux thread-owned children regression")
+class RecoveryOwnedProcessTests(unittest.TestCase):
+    def test_finds_and_terminates_engine_spawned_by_worker_thread(self):
+        spawned = queue.Queue()
+        release_worker = threading.Event()
+
+        def spawn_from_worker():
+            try:
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "managed-serve"],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                spawned.put(child)
+            except BaseException as error:
+                spawned.put(error)
+            release_worker.wait(20)
+
+        worker = threading.Thread(target=spawn_from_worker)
+        worker.start()
+        engine = unrelated = None
+        try:
+            engine = spawned.get(timeout=10)
+            if isinstance(engine, BaseException):
+                raise engine
+            unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            parent_pid = os.getpid()
+            leader_children = (Path("/proc") / str(parent_pid) / "task" / str(parent_pid) / "children").read_text().split()
+            self.assertNotIn(str(engine.pid), leader_children)
+            binary = Path(sys.executable)
+            self.assertEqual(recovery.linux_owned_engine_candidates(parent_pid, binary), [engine.pid])
+            self.assertFalse(recovery.linux_owned_engine_matches(engine.pid, parent_pid + 1, binary))
+            self.assertFalse(recovery.linux_owned_engine_matches(engine.pid, parent_pid, Path("/not-this-fixture")))
+
+            recovery.terminate_owned_engine(SimpleNamespace(process=SimpleNamespace(pid=parent_pid)), binary)
+            self.assertEqual(engine.wait(timeout=5), -signal.SIGKILL)
+            self.assertIsNone(unrelated.poll())
+        finally:
+            for child in (engine, unrelated):
+                if isinstance(child, subprocess.Popen):
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait(timeout=5)
+            release_worker.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
 
 
 if __name__ == "__main__":

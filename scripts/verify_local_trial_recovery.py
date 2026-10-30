@@ -77,6 +77,30 @@ def assert_data(app, user_id, world_id, role_id):
     check(role_id in assigned.get("role_ids", []), "role_assignment_lost")
 
 
+def linux_owned_engine_matches(pid, parent_pid, binary):
+    process = Path("/proc") / str(pid)
+    try:
+        parent = next((line.partition(":")[2].strip() for line in (process / "status").read_text().splitlines()
+                       if line.startswith("PPid:")), None)
+        return (parent == str(parent_pid)
+                and (process / "exe").resolve(strict=True) == binary.resolve()
+                and b"managed-serve" in (process / "cmdline").read_bytes().split(b"\0"))
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+def linux_owned_engine_candidates(parent_pid, binary):
+    # Linux tracks children on their spawning thread, including Tokio workers.
+    # Aggregate every task, then verify the process-wide parent and identity.
+    children = set()
+    for task in (Path("/proc") / str(parent_pid) / "task").iterdir():
+        try:
+            children.update(int(child) for child in (task / "children").read_text().split())
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return sorted(child for child in children if linux_owned_engine_matches(child, parent_pid, binary))
+
+
 def terminate_owned_engine(app, binary):
     """Terminate only this fixture launcher's exact managed-serve child."""
     if os.name == "nt":
@@ -111,24 +135,18 @@ def terminate_owned_engine(app, binary):
         finally:
             kernel.CloseHandle(handle)
     else:
-        children = Path(f"/proc/{app.process.pid}/task/{app.process.pid}/children").read_text().split()
-        candidates = []
-        for child in children:
-            process = Path("/proc") / child
-            try:
-                if (process / "exe").resolve() == binary.resolve() and b"managed-serve" in (process / "cmdline").read_bytes().split(b"\0"):
-                    candidates.append(int(child))
-            except FileNotFoundError:
-                pass
+        candidates = linux_owned_engine_candidates(app.process.pid, binary)
         check(len(candidates) == 1, "owned_engine_not_unique")
         if hasattr(os, "pidfd_open"):
             descriptor = os.pidfd_open(candidates[0])
             try:
+                check(linux_owned_engine_matches(candidates[0], app.process.pid, binary), "owned_engine_identity_changed")
                 signal.pidfd_send_signal(descriptor, signal.SIGKILL)
                 check(bool(select.select([descriptor], [], [], 10)[0]), "owned_engine_exit_timeout")
             finally:
                 os.close(descriptor)
         else:
+            check(linux_owned_engine_matches(candidates[0], app.process.pid, binary), "owned_engine_identity_changed")
             os.kill(candidates[0], signal.SIGKILL)
             deadline = time.monotonic() + 10
             process = Path("/proc") / str(candidates[0])
