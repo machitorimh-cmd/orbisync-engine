@@ -12,6 +12,7 @@ from unittest.mock import patch
 from scripts import build_postgres_runtime as builder
 from scripts import package_server
 from scripts import postgres_runtime as runtime
+from scripts import private_fixture
 
 
 class RuntimeIntegrityTests(unittest.TestCase):
@@ -68,6 +69,31 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(runtime.validate_runtime(self.root, self.target)["version"], runtime.VERSION)
         with self.assertRaises(ValueError):
             runtime.validate_runtime(self.root, runtime.TARGETS[1])
+
+    def test_new_private_fixture_grants_only_current_sid_for_restricted_postgres(self):
+        sid = "S-1-5-21-123-456-789-1001"
+        owner = subprocess.CompletedProcess([], 0, stdout=f'"host\\user","{sid}"\r\n'.encode())
+        system = Path(self.temporary.name) / "Windows"
+        with patch.object(private_fixture, "WINDOWS", True), \
+                patch.dict(private_fixture.os.environ, {"SystemRoot": str(system)}), \
+                patch.object(private_fixture.subprocess, "run", side_effect=[owner, None]) as run:
+            with private_fixture.private_temporary_directory(prefix="orbisync-test-private-") as directory:
+                created = Path(directory)
+                self.assertTrue(created.is_dir())
+                self.assertEqual(run.call_args_list[0].args[0],
+                                 [str(system / "System32/whoami.exe"), "/user", "/fo", "csv", "/nh"])
+                self.assertEqual(run.call_args_list[1].args[0],
+                                 [str(system / "System32/icacls.exe"), directory, "/grant:r", f"*{sid}:(OI)(CI)F"])
+                self.assertTrue(run.call_args_list[1].kwargs["check"])
+            self.assertFalse(created.exists())
+        invalid = subprocess.CompletedProcess([], 0, stdout=b'"host\\user","Everyone"\r\n')
+        with patch.object(private_fixture, "WINDOWS", True), \
+                patch.dict(private_fixture.os.environ, {"SystemRoot": str(system)}), \
+                patch.object(private_fixture.subprocess, "run", return_value=invalid) as run, \
+                self.assertRaisesRegex(RuntimeError, "user SID"):
+            with private_fixture.private_temporary_directory(prefix="orbisync-test-private-"):
+                self.fail("invalid identity must fail before exposing a fixture")
+        self.assertEqual(run.call_count, 1)
 
     def test_dependency_audit_accepts_os_and_bundled_libraries_but_rejects_external_or_dynamic_crt(self):
         def output(names):

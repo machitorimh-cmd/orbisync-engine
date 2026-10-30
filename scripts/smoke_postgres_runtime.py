@@ -6,13 +6,17 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
-import tempfile
+
+if __package__:
+    from .private_fixture import private_temporary_directory
+else:
+    from private_fixture import private_temporary_directory
 
 
 def smoke(runtime):
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         raise RuntimeError("PostgreSQL smoke must run as an unprivileged user")
-    with tempfile.TemporaryDirectory(prefix="orbisync-pg-relocated-") as temporary:
+    with private_temporary_directory(prefix="orbisync-pg-relocated-") as temporary:
         temporary = Path(temporary)
         moved = temporary / "runtime with spaces" / "postgres"
         shutil.copytree(runtime, moved)

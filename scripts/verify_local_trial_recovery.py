@@ -21,7 +21,12 @@ import threading
 import time
 import tomllib
 
-from verify_web_admin import Launcher
+if __package__:
+    from .private_fixture import private_temporary_directory
+    from .verify_web_admin import Launcher
+else:
+    from private_fixture import private_temporary_directory
+    from verify_web_admin import Launcher
 
 STAGE = "initialization"
 
@@ -49,8 +54,17 @@ def engine_port(directory):
 
 def listen(port):
     server = socket.socket()
-    server.bind(("127.0.0.1", port))
-    server.listen(4)
+    try:
+        # Unix retains closed engine/database connections in TIME_WAIT. Reuse
+        # those tuples without permitting a second live listener (SO_REUSEPORT).
+        # Windows SO_REUSEADDR can steal a live listener, so keep it disabled.
+        if os.name != "nt":
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(4)
+    except BaseException:
+        server.close()
+        raise
     return server
 
 
@@ -179,7 +193,7 @@ def main():
     binary = args.binary.resolve()
     check(binary.is_file() and (binary.parent / "runtime/postgres/BUILD.json").is_file(), "bundled_runtime_required")
     apps, sockets, servers = [], [], []
-    with tempfile.TemporaryDirectory(prefix="orbisync-local-trial-recovery-") as temporary:
+    with private_temporary_directory(prefix="orbisync-local-trial-recovery-") as temporary:
         root = Path(temporary).resolve()
         check(root.parent == Path(tempfile.gettempdir()).resolve() and root.name.startswith("orbisync-local-trial-recovery-"), "unsafe_fixture_root")
         try:

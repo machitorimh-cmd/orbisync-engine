@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -14,15 +13,17 @@ import urllib.error
 
 if __package__:
     from . import postgres_runtime
+    from .private_fixture import private_temporary_directory
 else:
     import postgres_runtime
+    from private_fixture import private_temporary_directory
 
 
 def smoke(bundle, target):
     postgres_runtime.validate_runtime(bundle / "runtime/postgres", target)
     suffix = ".exe" if "windows" in target else ""
     binary = bundle / ("orbisync-server" + suffix)
-    with tempfile.TemporaryDirectory(prefix="orbisync-consumer-") as temporary:
+    with private_temporary_directory(prefix="orbisync-consumer-") as temporary:
         data = Path(temporary) / "private-install"
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("ORBISYNC_", "PG")) and key != "DATABASE_URL"}

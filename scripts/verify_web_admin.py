@@ -11,11 +11,15 @@ from pathlib import Path
 import re
 import socket
 import subprocess
-import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
+
+if __package__:
+    from .private_fixture import private_temporary_directory
+else:
+    from private_fixture import private_temporary_directory
 
 
 def uuid7():
@@ -131,7 +135,7 @@ def main():
     db = os.environ["ORBISYNC_ADMIN_TEST_DATABASE_URL"]
     engine_port = free_port()
     children = []
-    with tempfile.TemporaryDirectory(prefix="orbisync-admin-smoke-") as temporary:
+    with private_temporary_directory(prefix="orbisync-admin-smoke-") as temporary:
         root = Path(temporary)
         directory = root / "installation"
         try:

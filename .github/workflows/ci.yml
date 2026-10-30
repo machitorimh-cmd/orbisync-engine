@@ -110,6 +110,8 @@ jobs:
         run: python -m unittest scripts/test_check_npm_audit.py
       - name: Unit tests for bundled PostgreSQL integrity and packaging
         run: python -m unittest scripts/test_postgres_runtime.py
+      - name: Unit tests for recovery fixture port ownership
+        run: python scripts/test_local_trial_recovery.py -v
       - name: Check HttpState wiring (IDEM-1)
         run: python scripts/check_http_state_wiring.py
       - name: Check HTTP handler fail-closed (AUD-C3)

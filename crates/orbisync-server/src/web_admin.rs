@@ -804,6 +804,17 @@ pub(super) fn private_dir(path: &Path) -> std::io::Result<()> {
             if !user.status.success() || !sid.starts_with("S-1-") {
                 return Err(std::io::Error::other("Cannot determine directory owner."));
             }
+            // Elevated Windows tokens can create an Administrators-owned
+            // directory. Assign only this newly created directory to the
+            // current user before enforcing the private ACL below.
+            let owner = std::process::Command::new(system_directory.join("icacls.exe"))
+                .arg(path)
+                .args(["/setowner", &format!("*{sid}")])
+                .creation_flags(0x08000000)
+                .output()?;
+            if !owner.status.success() {
+                return Err(std::io::Error::other("Cannot set private directory owner."));
+            }
             let result = std::process::Command::new(system_directory.join("icacls.exe"))
                 .arg(path)
                 .args(["/inheritance:r", "/grant:r", &format!("*{sid}:(OI)(CI)F")])
