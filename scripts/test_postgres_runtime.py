@@ -80,6 +80,27 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     self.assertRaises(ValueError):
                 builder.dependency_audit(self.root, self.target)
 
+    def test_linux_dependency_audit_handles_no_needed_libraries_without_allowing_external_deps(self):
+        linux = Path(self.temporary.name) / "linux"
+        module = linux / "lib/auth_delay.so"
+        module.parent.mkdir(parents=True)
+        module.write_bytes(b"ELF module fixture")
+        def output(text):
+            return subprocess.CompletedProcess([], 0, stdout=text, stderr="")
+        with patch.object(builder.subprocess, "run", return_value=output("\tstatically linked\n")) as inspect:
+            self.assertEqual(builder.dependency_audit(linux, runtime.TARGETS[1]), {"lib/auth_delay.so": []})
+            self.assertEqual(inspect.call_args.kwargs["env"]["LC_ALL"], "C")
+        system_deps = "libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x123)\n/lib64/ld-linux-x86-64.so.2 (0x456)\n"
+        with patch.object(builder.subprocess, "run", return_value=output(system_deps)):
+            self.assertEqual(builder.dependency_audit(linux, runtime.TARGETS[1])["lib/auth_delay.so"],
+                             ["ld-linux-x86-64.so.2", "libc.so.6"])
+        for text in ("statically linked\nlibssl.so.3 => /usr/lib/libssl.so.3 (0x123)\n",
+                     "statically linked\nlibpq.so.5 => not found\n", "statically linked unexpected\n"):
+            with self.subTest(text=text), \
+                    patch.object(builder.subprocess, "run", return_value=output(text)), \
+                    self.assertRaises(ValueError):
+                builder.dependency_audit(linux, runtime.TARGETS[1])
+
     def test_changed_binary_extra_file_and_missing_data_fail(self):
         for name, mutation in [
             ("bin/postgres.exe", b"MZtampered"), ("bin/foreign.dll", b"MZinjected"),

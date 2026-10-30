@@ -86,6 +86,8 @@ def dependency_audit(runtime, target, extra_executables=(), library_dir=None):
                   "bcryptprimitives.dll", "combase.dll"}
     env = os.environ.copy()
     env["VSLANG"] = "1033"
+    if not windows:
+        env["LC_ALL"] = "C"
     env["LD_LIBRARY_PATH"] = str(library_dir or runtime / "lib")
     for path in paths:
         if not (path.suffix.lower() in (".exe", ".dll") if windows else
@@ -96,7 +98,10 @@ def dependency_audit(runtime, target, extra_executables=(), library_dir=None):
         if "not found" in result.stdout.lower():
             raise ValueError(f"unresolved runtime dependency: {path.name}")
         deps = re.findall(r"^\s*([A-Za-z0-9_.+-]+\.(?:dll|exe))\s*$", result.stdout, re.M | re.I) if windows else [
-            line.strip().split()[0].rsplit("/", 1)[-1] for line in result.stdout.splitlines() if line.strip()]
+            line.strip().split()[0].rsplit("/", 1)[-1] for line in result.stdout.splitlines()
+            # ELF modules can resolve their symbols from postgres itself and
+            # have no DT_NEEDED entries. ldd reports this exact status line.
+            if line.strip() and line.strip() != "statically linked"]
         for name in deps:
             key = name.lower()
             if windows and key.startswith(("vcruntime", "msvcp", "concrt")):
