@@ -41,6 +41,8 @@ The packager requires `--postgres-runtime` and verifies the provenance, source a
 
 `pr-ci` requires the distribution matrix in addition to every existing gate. Successful jobs retain only public archives and detached hashes as artifacts. Private trial state, logs, launch capabilities, and credentials are never uploaded.
 
+The CI runtime, PostgreSQL build workspace, package output, and extracted consumer bundle use four separate paths under the runner's temporary directory. They stay outside Cargo's cached `target/` tree. Runtime/package outputs must still be new directories; restoring a Rust cache never authorizes overwriting an existing runtime or bundle. The `distribution-v2` cache key excludes older caches that contained these producer outputs.
+
 Dispatch `release-server.yml` with an existing `v`-prefixed tag at the selected commit. `publish=false` builds artifacts without publishing a release. `publish=true` also requires a successful full CI run at that same commit and matching tag, assembles `SHA256SUMS.txt`, verifies it, and publishes the assets. Tags containing a hyphen, such as `v0.1.0-preview.2`, publish as GitHub prereleases; ordinary version tags publish as standard releases. Do not reuse a tag for different contents.
 
 ## Licenses and runtime updates

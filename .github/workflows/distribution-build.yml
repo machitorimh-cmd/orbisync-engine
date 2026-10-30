@@ -30,10 +30,29 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
+      - name: Allocate producer paths outside the Rust cache
+        shell: python
+        env:
+          PRODUCER_TEMP: ${{ runner.temp }}
+          PACKAGE_TARGET: ${{ matrix.target }}
+        run: |
+          import os
+          from pathlib import Path
+          temporary = Path(os.environ['PRODUCER_TEMP'])
+          paths = {
+            'POSTGRES_RUNTIME': temporary / ('orbisync-postgres-runtime-' + os.environ['PACKAGE_TARGET']),
+            'POSTGRES_WORK': temporary / ('orbisync-postgres-work-' + os.environ['PACKAGE_TARGET']),
+            'DISTRIBUTION_OUTPUT': temporary / ('orbisync-distribution-' + os.environ['PACKAGE_TARGET']),
+            'CONSUMER_EXTRACTED': temporary / ('orbisync-consumer-extracted-' + os.environ['PACKAGE_TARGET']),
+          }
+          assert temporary.is_absolute() and not any(path.exists() for path in paths.values())
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
+            for key, path in paths.items():
+              output.write(f'{key}={path.as_posix()}\n')
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
-          shared-key: distribution-${{ matrix.target }}
+          shared-key: distribution-v2-${{ matrix.target }}
           cache-on-failure: true
       - name: Install pinned build tools (never consumer prerequisites)
         run: python -m pip install meson==1.9.1 ninja==1.13.0
@@ -54,7 +73,13 @@ jobs:
           }
           'RUSTFLAGS=-C target-feature=+crt-static' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build and relocate-smoke pinned PostgreSQL 17.11
-        run: python scripts/build_postgres_runtime.py --target ${{ matrix.target }} --output target/postgres-runtime --jobs 4
+        shell: python
+        env:
+          PACKAGE_TARGET: ${{ matrix.target }}
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable, 'scripts/build_postgres_runtime.py', '--target', os.environ['PACKAGE_TARGET'],
+            '--output', os.environ['POSTGRES_RUNTIME'], '--work-dir', os.environ['POSTGRES_WORK'], '--jobs', '4'], check=True)
       - name: Build the self-contained server
         run: cargo build --locked --release -p orbisync-server --target ${{ matrix.target }}
       - name: Package with verified PostgreSQL runtime
@@ -65,18 +90,22 @@ jobs:
           PACKAGE_EXECUTABLE: ${{ matrix.executable }}
         run: |
           import os, subprocess, sys
+          from pathlib import Path
           subprocess.run([sys.executable, 'scripts/package_server.py', '--binary',
-            f"target/{os.environ['PACKAGE_TARGET']}/release/{os.environ['PACKAGE_EXECUTABLE']}",
-            '--postgres-runtime', 'target/postgres-runtime', '--target', os.environ['PACKAGE_TARGET'],
+            str(Path('target') / os.environ['PACKAGE_TARGET'] / 'release' / os.environ['PACKAGE_EXECUTABLE']),
+            '--postgres-runtime', os.environ['POSTGRES_RUNTIME'], '--target', os.environ['PACKAGE_TARGET'],
             '--version', os.environ['PACKAGE_VERSION'], '--source-commit', os.environ['GITHUB_SHA'],
-            '--output', 'target/distribution'], check=True)
+            '--output', os.environ['DISTRIBUTION_OUTPUT']], check=True)
       - name: Extract the actual archive for the consumer smoke
         shell: python
         run: |
-          import pathlib, shutil
-          archives = list(pathlib.Path('target/distribution').glob('*.zip')) + list(pathlib.Path('target/distribution').glob('*.tar.gz'))
+          import os, shutil
+          from pathlib import Path
+          distribution = Path(os.environ['DISTRIBUTION_OUTPUT'])
+          archives = list(distribution.glob('*.zip')) + list(distribution.glob('*.tar.gz'))
           assert len(archives) == 1
-          shutil.unpack_archive(str(archives[0]), 'target/consumer-extracted')
+          assert not Path(os.environ['CONSUMER_EXTRACTED']).exists()
+          shutil.unpack_archive(str(archives[0]), os.environ['CONSUMER_EXTRACTED'])
       - name: Managed database consumer setup, real protocol probe and persistent restart
         shell: python
         env:
@@ -84,9 +113,10 @@ jobs:
           PACKAGE_TARGET: ${{ matrix.target }}
         run: |
           import os, subprocess, sys
+          from pathlib import Path
           platform = 'windows-x86_64' if os.name == 'nt' else 'linux-x86_64'
-          bundle = f"target/consumer-extracted/orbisync-{os.environ['PACKAGE_VERSION']}-{platform}"
-          subprocess.run([sys.executable, 'scripts/smoke_distribution.py', '--bundle', bundle,
+          bundle = Path(os.environ['CONSUMER_EXTRACTED']) / f"orbisync-{os.environ['PACKAGE_VERSION']}-{platform}"
+          subprocess.run([sys.executable, 'scripts/smoke_distribution.py', '--bundle', str(bundle),
             '--target', os.environ['PACKAGE_TARGET']], check=True)
       - name: Managed installation recovery, port repair and private state regression
         shell: python
@@ -94,17 +124,18 @@ jobs:
           PACKAGE_VERSION: ${{ inputs.version }}
         run: |
           import os, subprocess, sys
+          from pathlib import Path
           platform = 'windows-x86_64' if os.name == 'nt' else 'linux-x86_64'
           executable = 'orbisync-server.exe' if os.name == 'nt' else 'orbisync-server'
-          binary = f"target/consumer-extracted/orbisync-{os.environ['PACKAGE_VERSION']}-{platform}/{executable}"
-          subprocess.run([sys.executable, 'scripts/verify_local_trial_recovery.py', '--binary', binary], check=True)
+          binary = Path(os.environ['CONSUMER_EXTRACTED']) / f"orbisync-{os.environ['PACKAGE_VERSION']}-{platform}" / executable
+          subprocess.run([sys.executable, 'scripts/verify_local_trial_recovery.py', '--binary', str(binary)], check=True)
       - name: Upload only verified public distribution files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: orbisync-bundle-${{ matrix.target }}
           path: |
-            target/distribution/*.zip
-            target/distribution/*.tar.gz
-            target/distribution/*.sha256
+            ${{ env.DISTRIBUTION_OUTPUT }}/*.zip
+            ${{ env.DISTRIBUTION_OUTPUT }}/*.tar.gz
+            ${{ env.DISTRIBUTION_OUTPUT }}/*.sha256
           if-no-files-found: error
           retention-days: 14
