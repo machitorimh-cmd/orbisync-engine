@@ -103,11 +103,23 @@ class Launcher:
         raise AssertionError("Engine did not become ready")
 
     def close(self):
-        if self.process.poll() is None:
-            # Fixture-only process termination. No live process is discovered or touched.
-            self.process.terminate()
-            self.process.wait(timeout=20)
-        self.stream.close()
+        try:
+            if self.process.poll() is None:
+                if getattr(self, "url", None) and getattr(self, "capability", None):
+                    try:
+                        # Wait for the owned engine/DB and their log handles
+                        # before the temporary installation can be removed.
+                        self.call("/admin/stop", "POST", {}, timeout=45)
+                    except Exception:
+                        # Startup may have failed before the control API was
+                        # usable. Still release this fixture's parent process.
+                        pass
+                if self.process.poll() is None:
+                    # Fixture-only termination; no process discovery/signalling.
+                    self.process.terminate()
+                    self.process.wait(timeout=20)
+        finally:
+            self.stream.close()
         print(f"Cleaned launcher PID={self.process.pid}", flush=True)
 
 
