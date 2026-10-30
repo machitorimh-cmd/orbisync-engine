@@ -304,37 +304,29 @@ impl LocalPostgres {
     }
 
     async fn start_inner(&mut self) -> Result<String, LocalPostgresError> {
+        self.clear_exited_running()?;
         if self.running.is_some() {
+            let observed = self.postmaster_identity()?;
             if self
                 .running
-                .as_mut()
-                .and_then(|running| running.child.as_mut())
-                .is_some_and(|child| child.try_wait().ok().flatten().is_some())
+                .as_ref()
+                .is_some_and(|running| running.child.is_none())
             {
-                self.running = None;
-            } else {
-                let observed = self.postmaster_identity()?;
-                if self
-                    .running
-                    .as_ref()
-                    .is_some_and(|running| running.child.is_none())
-                {
-                    self.verify_adopted_process(&observed)?;
-                }
-                let running = self
-                    .running
-                    .as_mut()
-                    .ok_or(LocalPostgresError::IdentityMismatch)?;
-                if running.identity.pid != observed.pid
-                    || (running.identity.started_seconds != 0 && running.identity != observed)
-                {
-                    return Err(LocalPostgresError::IdentityMismatch);
-                }
-                running.identity = observed;
-                let _verified = self.verified_connection().await?;
-                self.provision().await?;
-                return Ok(self.manifest.application_url());
+                self.verify_adopted_process(&observed)?;
             }
+            let running = self
+                .running
+                .as_mut()
+                .ok_or(LocalPostgresError::IdentityMismatch)?;
+            if running.identity.pid != observed.pid
+                || (running.identity.started_seconds != 0 && running.identity != observed)
+            {
+                return Err(LocalPostgresError::IdentityMismatch);
+            }
+            running.identity = observed;
+            let _verified = self.verified_connection().await?;
+            self.provision().await?;
+            return Ok(self.manifest.application_url());
         }
         self.stage = "initializing";
         self.ensure_cluster().await?;
@@ -799,12 +791,18 @@ impl LocalPostgres {
         drop(reservation);
         drop(previous_reservation);
         let result = self.start_inner().await;
-        if result.is_err() {
-            // A failed explicit repair must not leave engine secrets pointing
-            // at an unnoticed new port. Clean up only the newly owned child.
-            self.stop_owned_child();
+        if result.is_err() && self.running.is_some() {
+            // Roll back only after the newly tracked server has been stopped
+            // with the same OS/SQL checks used for an explicit stop. If that
+            // fails, retain its new port and identity for a safe retry. A start
+            // that never established an identity also retains the new port.
+            self.stop_inner().await?;
+            let new_port = self.manifest.port;
             self.manifest.port = previous_port;
-            self.persist_manifest()?;
+            if let Err(error) = self.persist_manifest() {
+                self.manifest.port = new_port;
+                return Err(error);
+            }
         }
         result
     }
@@ -814,13 +812,6 @@ impl LocalPostgres {
             &self.root.join("managed.json"),
             &serde_json::to_vec(&self.manifest).map_err(|_| LocalPostgresError::PrivateStorage)?,
         )
-    }
-
-    fn stop_owned_child(&mut self) {
-        if let Some(mut child) = self.running.take().and_then(|running| running.child) {
-            let _killed = child.kill();
-            let _reaped = child.wait();
-        }
     }
 
     /// Stops the verified cluster after the engine has drained and closed its
@@ -835,17 +826,10 @@ impl LocalPostgres {
     }
 
     async fn stop_inner(&mut self) -> Result<(), LocalPostgresError> {
+        self.clear_exited_running()?;
         let Some(running) = self.running.as_mut() else {
             return Ok(());
         };
-        if running
-            .child
-            .as_mut()
-            .is_some_and(|child| child.try_wait().ok().flatten().is_some())
-        {
-            self.running = None;
-            return Ok(());
-        }
         let mut expected = running.identity.clone();
         let observed = self.postmaster_identity()?;
         if expected.started_seconds == 0 && expected.pid == observed.pid {
@@ -876,6 +860,28 @@ impl LocalPostgres {
         }
         if let Some(mut child) = self.running.take().and_then(|running| running.child) {
             let _reaped = child.wait();
+        }
+        Ok(())
+    }
+
+    fn clear_exited_running(&mut self) -> Result<(), LocalPostgresError> {
+        let Some(running) = self.running.as_mut() else {
+            return Ok(());
+        };
+        let exited = if let Some(child) = running.child.as_mut() {
+            child
+                .try_wait()
+                .map_err(|_| LocalPostgresError::IdentityMismatch)?
+                .is_some()
+        } else {
+            // A missing PID file is insufficient: the process might still be
+            // shutting down or its PID might belong to another process. Only
+            // a successful OS query proving this recorded PID absent permits
+            // forgetting an adopted server. Any live/reused PID stays fenced.
+            recorded_process_absent(running.identity.pid)?
+        };
+        if exited {
+            self.running = None;
         }
         Ok(())
     }
@@ -984,6 +990,57 @@ impl LocalPostgres {
             }
         }
         Ok(matches)
+    }
+}
+
+fn recorded_process_absent(pid: u32) -> Result<bool, LocalPostgresError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        let status = Command::new(windows_powershell()?)
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter ('ProcessId = '+[uint32]$env:ORBISYNC_PG_PID); if ($null -eq $p) { exit 3 }; exit 0"])
+            .env("ORBISYNC_PG_PID", pid.to_string())
+            .env_remove("PSModulePath").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .creation_flags(0x08000000).status().map_err(|_| LocalPostgresError::IdentityMismatch)?;
+        match status.code() {
+            Some(3) => Ok(true),
+            Some(0) => Ok(false),
+            _ => Err(LocalPostgresError::IdentityMismatch),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::metadata(format!("/proc/{pid}")) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // hidepid can make another user's live/reused PID look absent.
+                // Treat an unknown or restricted proc mount as inconclusive.
+                let mounts = std::fs::read_to_string("/proc/mounts")
+                    .map_err(|_| LocalPostgresError::IdentityMismatch)?;
+                if !mounts.lines().any(|line| {
+                    let mut fields = line.split_whitespace();
+                    let _source = fields.next();
+                    fields.next() == Some("/proc")
+                        && fields.next() == Some("proc")
+                        && fields.next().is_some_and(|options| {
+                            options.split(',').all(|option| {
+                                !option.starts_with("hidepid=")
+                                    || matches!(option, "hidepid=0" | "hidepid=off")
+                            })
+                        })
+                }) {
+                    return Err(LocalPostgresError::IdentityMismatch);
+                }
+                Ok(true)
+            }
+            Err(_) => Err(LocalPostgresError::IdentityMismatch),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _pid = pid;
+        Err(LocalPostgresError::IdentityMismatch)
     }
 }
 

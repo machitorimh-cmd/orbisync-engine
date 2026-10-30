@@ -151,12 +151,6 @@ async fn start_installation(state: &WebState, install: &mut Installation) -> Web
     if !install.initialized() || install.dir.join("initializing").exists() {
         return Err(local_error("initialization_required"));
     }
-    if let Some(engine) = install.engine.as_mut()
-        && engine.try_wait().map_err(io_error)?.is_none()
-    {
-        return wait_engine_ready(state, install).await;
-    }
-    install.engine.take();
     if install.dir.join(TRIAL_METADATA_FILE).is_file() {
         if !local_postgres::LocalPostgres::managed(&install.dir) {
             return Err(local_error("recovery_required"));
@@ -181,6 +175,12 @@ async fn start_installation(state: &WebState, install: &mut Installation) -> Web
         }
         secrets.clear();
     }
+    if let Some(engine) = install.engine.as_mut()
+        && engine.try_wait().map_err(io_error)?.is_none()
+    {
+        return wait_engine_ready(state, install).await;
+    }
+    install.engine.take();
     set_phase(state, "engine_starting");
     let config = install.config()?;
     let address = loopback_bind(&config.server.bind)?;

@@ -162,6 +162,34 @@ fn managed_postgres_operations_are_send_for_owned_http_lifecycle() {
     send(controller.grant_runtime_access());
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
+async fn managed_postgres_live_or_reused_pid_remains_fenced() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let expected = PostmasterIdentity {
+        pid: std::process::id(),
+        started_seconds: 1,
+    };
+    controller.running = Some(Running {
+        child: None,
+        identity: expected.clone(),
+    });
+    assert!(!recorded_process_absent(expected.pid).unwrap());
+    for error in [
+        controller.start().await.unwrap_err(),
+        controller.stop().await.unwrap_err(),
+        controller.repair_port().await.unwrap_err(),
+    ] {
+        assert_eq!(error, LocalPostgresError::IdentityMismatch);
+    }
+    assert_eq!(
+        controller.running.as_ref().map(|running| &running.identity),
+        Some(&expected),
+        "an existing PID is never forgotten because its PID file is absent"
+    );
+}
+
 #[test]
 #[cfg(windows)]
 fn managed_postgres_windows_filesystem_codepage_identity_matches_unicode_path() {
@@ -408,8 +436,11 @@ async fn managed_postgres_windows_restricted_start_is_verified_and_preserves_dat
             .as_ref()
             .map(|running| running.identity.clone())
             .unwrap();
-        controller.stop().await.unwrap();
-        assert!(controller.running.is_none());
+        // An external clean stop removes postmaster.pid while this controller
+        // retains child=None. The same launcher must recover without dropping
+        // its exclusive installation lock or resetting the saved URL.
+        stop_test_cluster_externally(&controller).await;
+        assert!(controller.running.is_some());
         assert_eq!(controller.start().await.unwrap(), url);
         assert!(
             controller
@@ -432,6 +463,24 @@ async fn managed_postgres_windows_restricted_start_is_verified_and_preserves_dat
             "survives restricted restart"
         );
         application.close().await;
+
+        // Stop and explicit repair use the same definite-process-exit check.
+        stop_test_cluster_externally(&controller).await;
+        controller.stop().await.unwrap();
+        assert!(controller.running.is_none());
+        assert_eq!(controller.start().await.unwrap(), url);
+        stop_test_cluster_externally(&controller).await;
+        let repaired = controller.repair_port().await.unwrap();
+        assert_ne!(repaired, url);
+        let application = sqlx::PgPool::connect(&repaired).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT value FROM restricted_start_probe")
+                .fetch_one(&application)
+                .await
+                .unwrap(),
+            "survives restricted restart"
+        );
+        application.close().await;
     })
     .catch_unwind()
     .await;
@@ -442,4 +491,110 @@ async fn managed_postgres_windows_restricted_start_is_verified_and_preserves_dat
     }
     stopped.unwrap();
     assert_eq!(controller.status().state, "stopped");
+}
+
+#[cfg(windows)]
+async fn stop_test_cluster_externally(controller: &LocalPostgres) {
+    let mut command = controller.command("pg_ctl");
+    command
+        .arg("stop")
+        .arg("-D")
+        .arg(&controller.data)
+        .args(["-m", "fast", "-w", "-t", "15"]);
+    assert!(
+        run_command(command, Duration::from_secs(20))
+            .await
+            .unwrap()
+            .success()
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn managed_postgres_restricted_repair_stops_new_server_before_port_rollback() {
+    use futures_util::FutureExt as _;
+    let Some(runtime) = std::env::var_os("ORBISYNC_TEST_POSTGRES_RUNTIME") else {
+        eprintln!("restricted PostgreSQL repair test requires ORBISYNC_TEST_POSTGRES_RUNTIME");
+        return;
+    };
+    let fixture = Fixture::new();
+    let mut controller =
+        LocalPostgres::open_with_runtime(&fixture.root, Path::new(&runtime)).unwrap();
+    controller.force_restricted_start = true;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let url = controller.start().await.unwrap();
+        let previous_port = controller.manifest.port;
+        let owner = sqlx::PgPool::connect(&controller.migration_database_url())
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE repair_rollback_probe(value TEXT NOT NULL)")
+            .execute(&owner)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO repair_rollback_probe VALUES ('preserved after rollback')")
+            .execute(&owner)
+            .await
+            .unwrap();
+        // A real provisioning precondition fails after the new port has
+        // started and passed OS/SQL identity checks. No fault-injection API.
+        sqlx::query("ALTER DATABASE orbisync OWNER TO orbisync")
+            .execute(&owner)
+            .await
+            .unwrap();
+        owner.close().await;
+        assert_eq!(
+            controller.repair_port().await.unwrap_err(),
+            LocalPostgresError::IdentityMismatch
+        );
+        assert!(controller.running.is_none());
+        assert!(!controller.data.join("postmaster.pid").exists());
+        assert_eq!(controller.manifest.port, previous_port);
+        assert_eq!(controller.application_database_url(), url);
+        let persisted: Manifest =
+            serde_json::from_slice(&std::fs::read(controller.root.join("managed.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted.port, previous_port);
+        let configuration =
+            std::fs::read_to_string(controller.data.join("postgresql.conf")).unwrap();
+        let new_port: u16 = configuration
+            .lines()
+            .find_map(|line| line.strip_prefix("port = "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(new_port, previous_port);
+        let released = TcpListener::bind((Ipv4Addr::LOCALHOST, new_port)).unwrap();
+        drop(released);
+
+        // The old port remains usable for operator recovery, and the real
+        // failed provisioning operation did not delete or recreate any data.
+        assert_eq!(
+            controller.start().await.unwrap_err(),
+            LocalPostgresError::IdentityMismatch
+        );
+        assert!(controller.running.is_some());
+        let owner = sqlx::PgPool::connect(&controller.migration_database_url())
+            .await
+            .unwrap();
+        sqlx::query("ALTER DATABASE orbisync OWNER TO orbisync_local_owner")
+            .execute(&owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT value FROM repair_rollback_probe")
+                .fetch_one(&owner)
+                .await
+                .unwrap(),
+            "preserved after rollback"
+        );
+        owner.close().await;
+        assert_eq!(controller.start().await.unwrap(), url);
+    })
+    .catch_unwind()
+    .await;
+    let stopped = controller.stop().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    stopped.unwrap();
 }

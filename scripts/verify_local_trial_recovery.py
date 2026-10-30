@@ -202,6 +202,27 @@ def fixture_sql(binary, directory, root, sql):
     check(result.returncode == 0, "fixture_sql_failed")
 
 
+def stop_fixture_database(binary, directory, root):
+    """Simulate an external PG stop, targeting only this owned fixture data."""
+    owned_root = root.resolve(strict=True)
+    installation = directory.resolve(strict=True)
+    check(installation != owned_root and installation.is_relative_to(owned_root), "fixture_directory_mismatch")
+    data = (installation / "local-postgres/data").resolve(strict=True)
+    check(data.is_relative_to(installation), "fixture_database_path_mismatch")
+    manifest = json.loads((installation / "local-postgres/managed.json").read_text(encoding="utf-8"))
+    metadata = json.loads((installation / "local-trial.json").read_text(encoding="utf-8"))
+    check(manifest.get("postgres_major") == 17 and metadata.get("complete") is True, "fixture_database_identity_unconfirmed")
+    control = binary.parent / "runtime/postgres/bin" / ("pg_ctl.exe" if os.name == "nt" else "pg_ctl")
+    check(control.is_file(), "fixture_pg_ctl_missing")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+    if os.name != "nt":
+        env["LD_LIBRARY_PATH"] = str(binary.parent / "runtime/postgres/lib")
+    result = subprocess.run([str(control), "stop", "-D", str(data), "-m", "fast", "-w", "-t", "15"],
+                            env=env, capture_output=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0, timeout=30)
+    check(result.returncode == 0 and not (data / "postmaster.pid").exists(), "fixture_database_stop_failed")
+
+
 def main():
     global STAGE
     parser = argparse.ArgumentParser(description=__doc__)
@@ -233,6 +254,15 @@ def main():
             check(api(app, "/admin/status")["ready"] is False, "stop_still_ready")
             api(app, "/admin/start", "POST", {}); probe(app); assert_data(app, *identifiers)
             api(app, "/admin/restart", "POST", {}); probe(app); assert_data(app, *identifiers)
+            STAGE = "database_only_recovery"
+            stop_fixture_database(binary, directory, root)
+            # The engine may stay alive with a disconnected pool, or exit on
+            # a generation/lease failure. Both must recover through Start.
+            engine_state = api(app, "/admin/status")["engine"]
+            check(engine_state in ("running", "stopped"), "database_recovery_engine_state_invalid")
+            print("Observed database-only recovery: engine remained alive." if engine_state == "running"
+                  else "Observed database-only recovery: engine exited after database stop.", flush=True)
+            api(app, "/admin/start", "POST", {}); probe(app); assert_data(app, *identifiers)
             STAGE = "resume_credentials"
             resumed = api(app, "/admin/local-trial", "POST", {})
             check("initial_password" not in resumed and resumed.get("access_token"), "initial_password_repeated")
@@ -307,7 +337,7 @@ def main():
                 check(any(partial_dir.glob("incomplete-setup-*")), "partial_files_not_preserved")
                 check(not (partial_dir / "initializing").exists(), "partial_marker_not_completed")
             STAGE = "complete"
-            print("PASS: real local trial, four probe stages, lifecycle/data retention, password-once resume, engine/database port repair, unknown action rejection, foreign HTTP secret fence, reload" + (" and pre-config partial recovery." if not args.skip_partial else "."), flush=True)
+            print("PASS: real local trial, four probe stages, lifecycle/data retention, database-only recovery, password-once resume, engine/database port repair, unknown action rejection, foreign HTTP secret fence, reload" + (" and pre-config partial recovery." if not args.skip_partial else "."), flush=True)
         finally:
             for app in reversed(apps):
                 if app.process.poll() is None:
