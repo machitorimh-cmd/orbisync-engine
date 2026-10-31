@@ -23,8 +23,8 @@ This x86_64 build uses Ubuntu 22.04 as its baseline and requires glibc 2.35 or l
 Extract the archive into a dedicated writable directory owned by your ordinary user:
 
 ```sh
-tar -xzf orbisync-v0.1.0-preview.2-linux-x86_64.tar.gz
-cd orbisync-v0.1.0-preview.2-linux-x86_64
+tar -xzf orbisync-v0.1.0-preview.3-linux-x86_64.tar.gz
+cd orbisync-v0.1.0-preview.3-linux-x86_64
 ./start-web-admin.sh
 ```
 
@@ -50,6 +50,16 @@ The header switches between Japanese and English. Administration prefers port 80
 The launcher uses the package directory as its working directory. Configuration, secrets, and the local database are stored in `.orbisync-admin/` by default; the database files are under its `local-postgres/data/` directory. Restart using the same launcher in the same directory. Use `--data-dir` to select another location. Stop with Ctrl+C in the terminal. Securely back up both the database and configuration directory; copying live database files alone is not a consistent backup. Never add the private installation directory to a redistribution ZIP or Git.
 
 This local Web launcher does not automatically configure a public network service. See the [Web administration guide](https://github.com/machitorimh-cmd/orbisync-engine/blob/main/apps/admin-web/README.md) for ordinary `serve`, existing installations, recovery, and TLS considerations.
+
+## Guest participation from your app
+
+Create a World and Instance in administration, start the Instance, then enable
+**Configuration → Guest participation** and select the allowed World. Save and
+restart the engine. A Guest role is prepared on first use when needed.
+
+Set the app's **engine URL and Instance ID** from administration. These differ
+from the administration URL and World ID. Leave and Join again to obtain a fresh
+guest session after a settings change. Guests cannot join unselected Worlds.
 
 ## Contents and verification
 

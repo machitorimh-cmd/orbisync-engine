@@ -14,7 +14,7 @@ OrbiSyncは、複数の認証済みクライアントでワールド、エンテ
 
 **DBの手作業準備は不要です。Rust・Node.js・Dockerのインストールも必要ありません。**
 
-1. [配布ページ](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2)から、Windows x64用ZIPまたはLinux x86_64用tar.gzをダウンロードします。「Source code」ではなく、OS名の付いたアーカイブを選んでください。
+1. [配布ページ](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.3)から、Windows x64用ZIPまたはLinux x86_64用tar.gzをダウンロードします。「Source code」ではなく、OS名の付いたアーカイブを選んでください。
 2. 全体を専用フォルダへ展開し、Windowsは `start-web-admin.cmd`、Linuxは `./start-web-admin.sh` を実行します。
 3. 開いた管理画面で **このPCで試す** を押します。同梱PostgreSQLの準備・初期設定・エンジン起動・ログインが自動で進みます。初回に表示される管理者パスワードを保存してください。
 4. 接続テストの **HTTP・WebSocket・入室・初期同期** がすべて成功すれば、起動確認は完了です。

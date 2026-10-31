@@ -6,12 +6,12 @@
 
 ## 1. ダウンロードして展開する
 
-[v0.1.0-preview.2の配布ページ](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2)から、OSに合うファイルをダウンロードします。GitHubが自動生成する「Source code」ではなく、次のアーカイブを選んでください。
+[v0.1.0-preview.3の配布ページ](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.3)から、OSに合うファイルをダウンロードします。GitHubが自動生成する「Source code」ではなく、次のアーカイブを選んでください。
 
 | OS | ファイル |
 |---|---|
-| Windows x64 | `orbisync-v0.1.0-preview.2-windows-x86_64.zip` |
-| Linux x86_64（glibc 2.35以降） | `orbisync-v0.1.0-preview.2-linux-x86_64.tar.gz` |
+| Windows x64 | `orbisync-v0.1.0-preview.3-windows-x86_64.zip` |
+| Linux x86_64（glibc 2.35以降） | `orbisync-v0.1.0-preview.3-linux-x86_64.tar.gz` |
 
 書き込み可能な専用フォルダに、アーカイブ全体を展開します。実行ファイルと同梱の `runtime/` は一緒に置いてください。
 
@@ -22,8 +22,8 @@ Windowsでは、展開したフォルダの **`start-web-admin.cmd`** を開き�
 Linuxでは、一般ユーザーで次を実行します。
 
 ```sh
-tar -xzf orbisync-v0.1.0-preview.2-linux-x86_64.tar.gz
-cd orbisync-v0.1.0-preview.2-linux-x86_64
+tar -xzf orbisync-v0.1.0-preview.3-linux-x86_64.tar.gz
+cd orbisync-v0.1.0-preview.3-linux-x86_64
 ./start-web-admin.sh
 ```
 

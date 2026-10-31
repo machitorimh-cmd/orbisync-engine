@@ -23,8 +23,8 @@ Ubuntu 22.04 のビルドを基準とする glibc 2.35 以降の x86_64 Linux �
 アーカイブを一般ユーザーが所有する書込み可能な専用フォルダへ展開します。
 
 ```sh
-tar -xzf orbisync-v0.1.0-preview.2-linux-x86_64.tar.gz
-cd orbisync-v0.1.0-preview.2-linux-x86_64
+tar -xzf orbisync-v0.1.0-preview.3-linux-x86_64.tar.gz
+cd orbisync-v0.1.0-preview.3-linux-x86_64
 ./start-web-admin.sh
 ```
 
@@ -50,6 +50,12 @@ cd orbisync-v0.1.0-preview.2-linux-x86_64
 ランチャーはパッケージのフォルダを作業ディレクトリにします。設定・秘密情報・ローカル DB は既定で `.orbisync-admin/` に保存され、DB 本体はその中の `local-postgres/data/` に置かれます。再起動には同じフォルダで同じランチャーを使います。別の保存先には `--data-dir` を指定できます。終了は端末のCtrl+Cです。バックアップはDBとこの設定ディレクトリを安全に保管してください。使用中の DB ファイルをコピーするだけでは整合したバックアップになりません。認証情報入りディレクトリを再配布ZIPやGitへ追加しないでください。
 
 このローカルWebランチャーは公開ネットワーク用のサービス構成を自動作成しません。通常の `serve`、既存環境、復旧、TLSなどは[Web管理ガイド](https://github.com/machitorimh-cmd/orbisync-engine/blob/main/apps/admin-web/README.md)を参照してください。
+
+## アプリからゲストで参加する
+
+管理画面でWorldとInstanceを作成してInstanceを起動し、**設定 → ゲスト参加**でゲスト参加を有効にして対象Worldを選択します。保存後にエンジンを再起動してください。必要なGuestロールは初回に準備されます。
+
+アプリには管理画面で確認した**エンジンの接続先URLとInstance ID**を設定します。管理画面のURLやWorld IDとは別の値です。設定変更前から接続していたアプリは退出して再度Joinし、新しいゲスト認証を受けてください。許可していないWorldへの入室は拒否されます。
 
 ## 内容と確認
 
