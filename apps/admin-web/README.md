@@ -4,11 +4,13 @@ The real UI is embedded in the Rust executable. The consumer distribution bundle
 PostgreSQL and needs no database installation, Docker, Node, SDK generation, or
 frontend build toolchain. An external PostgreSQL connection is an optional manual mode.
 
+For a first launch, see the [quick start](../../docs/guides/quickstart.en.md) ([日本語](../../docs/guides/quickstart.ja.md)). This guide also covers manual setup and operator configuration.
+
 ## Start a local trial
 
 Extract the complete distribution and open `start-web-admin.cmd` (Windows) or
 `start-web-admin.sh` (Linux). On Windows the bundled executable also opens this
-launcher when started without arguments. Choose **Try on this computer**.
+launcher when started without arguments. Choose **Try on this PC**.
 The launcher prepares its private PostgreSQL cluster, runs the stock migrations,
 creates local credentials, starts the engine and signs in. The first generated
 administrator password is displayed once. The real connection test checks HTTP
@@ -18,7 +20,7 @@ No sample application or SDK build is needed.
 
 Use **Stop**, **Start engine**, or **Restart** to control both owned processes.
 Settings and database contents remain in the private installation directory.
-Reopen the launcher and choose **Resume local trial** to use the saved environment.
+Reopen the launcher and choose **Continue local trial** to use the saved environment.
 Diagnostic actions can retry an interrupted setup or choose a new engine/database
 port. No unrelated service is stopped. If the administration port is occupied,
 the launcher opens another available loopback port automatically.

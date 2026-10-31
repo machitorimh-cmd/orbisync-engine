@@ -8,15 +8,28 @@
 
 OrbiSync is a Rust real-time synchronization engine for sharing worlds, entities, transforms, state, and events between authenticated clients. It provides PostgreSQL persistence, a REST API, a Protocol Buffers WebSocket protocol, and a TypeScript SDK. Rendering, assets, physics, and application-specific rules belong in clients or external services.
 
-This README describes the current source and configuration in the OSS repository. The project is under development, not certified for production or a guarantee of performance or connection capacity. Each release's notes record binary builds, startup checks, and untested areas. Historical verification is not presented as a new full test run, live-service validation, or load test of this public snapshot.
+This is a development preview. See each release's notes for supported environments and validation. It does not certify production readiness or guarantee performance or connection capacity.
 
-## Prebuilt server
+## Quick start: download and try
 
-Extract the Windows x64 ZIP or Linux x86_64 tar.gz from [GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2), then open `start-web-admin.cmd` or `start-web-admin.sh`. On Windows the bundled executable also opens the launcher directly. Choose **Try on this PC** to prepare the bundled PostgreSQL, initialize the installation, start the engine, and test a real connection. **No Rust, Node.js, Docker, database installation, or connection URL is required.**
+**No manual database setup or separate Rust, Node.js, or Docker installation is needed.**
 
-The administration screen stops, starts, and restarts both owned processes while preserving settings and data. Diagnostic actions retry setup or select free ports. The connection probe verifies HTTP authentication, WebSocket negotiation, instance admission, and initial synchronization. Local trials remain bound to this computer's loopback interface; manual external database setup is also available.
+1. Download the Windows x64 ZIP or Linux x86_64 tar.gz from the [release page](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2). Choose the OS-specific archive rather than "Source code".
+2. Extract the entire archive into a dedicated folder. Open `start-web-admin.cmd` on Windows or run `./start-web-admin.sh` on Linux.
+3. Select **Try on this PC** in the browser. Bundled PostgreSQL setup, initialization, engine startup, and sign-in run automatically. Save the administrator password shown on first setup.
+4. Verify that **HTTP, WebSocket, Room entry, and Initial synchronization** all pass.
 
-Archives include bilingual startup guides, launchers, PostgreSQL binaries/source/license, and dependency licenses. Checksums are in `SHA256SUMS.txt`. [Usage guide](deploy/distribution/README.en.md)
+Use the page to stop, start, or restart the environment. Next time, open the launcher in the same folder and select **Continue local trial**. Settings and data are saved in `.orbisync-admin/`.
+
+The **[step-by-step quick start](docs/guides/quickstart.en.md)** covers OS-specific commands, stopping, resuming, and troubleshooting. Local trials use this computer's loopback interface. Linux requires x86_64 with glibc 2.35 or later and an ordinary user account.
+
+| Goal | Guide |
+|---|---|
+| Start and try the engine on this computer | [Quick start](docs/guides/quickstart.en.md) |
+| Connect your own frontend | [Frontend integration](docs/guides/frontend-integration.md) |
+| Use an external database or existing installation, change storage location | [Web setup and administration](apps/admin-web/README.md) |
+| Check supported environments and checksums | [Distribution guide](deploy/distribution/README.en.md) |
+| Modify and build the source | Local development below |
 
 ## Implementation status
 
@@ -63,7 +76,7 @@ This repository has an independent Git history exported from the development rep
 
 The Rust build script generates protocol code using `protox`, so a local `protoc` installation is unnecessary. The embedded administration UI does not require Node.js. The standalone reference 3D demo declares Node.js 22 or newer.
 
-### Set up through the browser
+### Set up a source build with an external database
 
 Prepare an empty PostgreSQL database, then run from the repository root:
 

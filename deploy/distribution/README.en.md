@@ -4,6 +4,8 @@
 
 Download, extract, and launch this package to try the server and its embedded browser administration UI. PostgreSQL 17.11 is bundled. Local trials require no separate Rust, Node.js, Docker, or PostgreSQL installation and no database URL. This is a development preview.
 
+For your first launch, follow the [quick start](https://github.com/machitorimh-cmd/orbisync-engine/blob/main/docs/guides/quickstart.en.md). This guide covers supported environments, storage, and manual configuration.
+
 ## Windows x64
 
 Extract the ZIP into a dedicated directory writable by your ordinary user, then open `start-web-admin.cmd`. Administrator privileges are unnecessary. To launch from a terminal:

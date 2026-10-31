@@ -8,15 +8,28 @@
 
 OrbiSyncは、複数の認証済みクライアントでワールド、エンティティ、位置・向き・状態、イベントを共有するRust製のリアルタイム同期エンジンです。PostgreSQL、REST API、Protocol BuffersによるWebSocket通信、TypeScript SDKを提供します。描画、アセット、物理エンジン、アプリ固有のルールはクライアントや外部サービスに実装します。
 
-このREADMEはOSSリポジトリの現在のソースと設定を説明します。開発中であり、本番運用の準備完了や性能・接続数を保証するリリースではありません。配布バイナリのビルド・起動確認と未実施項目は各リリースノートに記載します。過去の検証結果を、この公開版の全テスト・実サービス接続・負荷試験の再実行結果として扱いません。
+開発中のプレビュー版です。配布版の対応環境と検証内容は各リリースノートを参照してください。本番運用や性能・接続数の保証を示すものではありません。
 
-## ビルド済みサーバー
+## クイックスタート：ダウンロードして試す
 
-[GitHub Releases](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2)のWindows x64用ZIP／Linux x86_64用tar.gzを展開し、`start-web-admin.cmd`／`start-web-admin.sh`を実行します。Windowsでは同梱の実行ファイルを直接開くこともできます。**「このPCで試す」を選ぶだけで、同梱PostgreSQLの準備・初期設定・エンジン起動・接続テストまで進みます。Rust・Node.js・Docker・DB接続URLの準備は不要です。**
+**DBの手作業準備は不要です。Rust・Node.js・Dockerのインストールも必要ありません。**
 
-管理画面からDBとエンジンの停止・再開・再起動ができます。設定とデータは保存され、次回も同じ環境を使えます。診断画面には再試行やポート変更の操作があり、接続テストは実際のHTTP認証・WebSocket・参加・初期同期まで確認します。ローカル試用はこのPCのloopback内で動作します。既存の外部DBを使う手動設定も残しています。
+1. [配布ページ](https://github.com/machitorimh-cmd/orbisync-engine/releases/tag/v0.1.0-preview.2)から、Windows x64用ZIPまたはLinux x86_64用tar.gzをダウンロードします。「Source code」ではなく、OS名の付いたアーカイブを選んでください。
+2. 全体を専用フォルダへ展開し、Windowsは `start-web-admin.cmd`、Linuxは `./start-web-admin.sh` を実行します。
+3. 開いた管理画面で **このPCで試す** を押します。同梱PostgreSQLの準備・初期設定・エンジン起動・ログインが自動で進みます。初回に表示される管理者パスワードを保存してください。
+4. 接続テストの **HTTP・WebSocket・入室・初期同期** がすべて成功すれば、起動確認は完了です。
 
-日英の起動ガイド、ランチャー、PostgreSQL本体・ソース・ライセンス、依存ライセンスを同梱しています。チェックサムは `SHA256SUMS.txt` です。[利用手順](deploy/distribution/README.ja.md)
+停止・起動・再起動も画面から操作できます。次回は同じフォルダのランチャーから **ローカル試用を再開** を選びます。データと設定は `.orbisync-admin/` に保存されます。
+
+**[クイックスタートガイド](docs/guides/quickstart.ja.md)**には、OS別の手順、停止・再開、起動に失敗した場合の操作をまとめています。ローカル試用はこのPC内の通信に限定されます。Linuxはglibc 2.35以降のx86_64環境で、一般ユーザーとして実行してください。
+
+| やりたいこと | ガイド |
+|---|---|
+| まずこのPCで起動して試す | [クイックスタート](docs/guides/quickstart.ja.md) |
+| 自分のフロントエンドを接続する | [フロントエンド接続](docs/guides/frontend-integration.md) |
+| 外部DB・既存環境を使う、保存先を変更する | [Webセットアップ・管理](apps/admin-web/README.md) |
+| 配布物の対応環境・チェックサムを確認する | [配布版の利用ガイド](deploy/distribution/README.ja.md) |
+| ソースを変更して開発する | このREADMEの「ローカル開発」 |
 
 ## 開発状況
 
@@ -63,7 +76,7 @@ cd orbisync-engine
 
 Rustサーバーはbuild script内の `protox` でプロトコルコードを生成するため、`protoc` は不要です。埋め込み管理UIの利用にはNode.jsも不要です。参照3Dデモ単体はNode.js 22以上を指定しています。
 
-### ブラウザで初期設定する
+### ソースビルドと外部DBで初期設定する
 
 空のPostgreSQLデータベースを用意して、リポジトリのルートで実行します。
 

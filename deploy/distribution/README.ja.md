@@ -4,6 +4,8 @@
 
 ダウンロード・展開して起動すると、同梱サーバーとブラウザ管理画面を試せるパッケージです。PostgreSQL 17.11 の実行環境も含まれます。ローカル試用には Rust、Node.js、Docker、PostgreSQL の別途インストールや DB 接続URLの入力は不要です。開発中のプレビュー版です。
 
+初めて使う場合は[クイックスタート](https://github.com/machitorimh-cmd/orbisync-engine/blob/main/docs/guides/quickstart.ja.md)から順に進めてください。このガイドは対応環境、保存先、手動設定などの詳細を説明します。
+
 ## Windows x64
 
 ZIPを一般ユーザーが書き込める専用フォルダへ展開し、`start-web-admin.cmd` を開きます。管理者権限で実行する必要はありません。端末から起動する場合:
