@@ -20,6 +20,50 @@ fn operational_diagnostics_detect_orphan_membership_but_allow_normal_grace() {
     assert!(sample.observed_at.is_some());
 }
 
+#[tokio::test]
+async fn review_stopped_directory_rejects_join_and_resume_before_actor_activation() {
+    for lifecycle in [orbisync_domain::InstanceLifecycle::Stopping, orbisync_domain::InstanceLifecycle::Stopped] {
+        for resume in [false, true] {
+            let (actor, instance, world, user, presence) = snapshot_fixture();
+            let id = instance.id();
+            let stopped = orbisync_domain::WorldInstance::from_persisted(
+                id, instance.world_id(), lifecycle, instance.capacity(), instance.created_at(),
+                instance.started_at(), instance.revision(),
+            ).unwrap();
+            let directory = Arc::new(orbisync_testkit::FakeWorldDirectoryStore::new());
+            directory.insert_world(world);
+            directory.insert_instance(stopped);
+            let registry = Arc::new(RuntimeRegistry::new());
+            if resume { registry.insert(id, actor).unwrap(); }
+            let state = Arc::new(RealtimeState::builder(
+                orbisync_config::Config::default().realtime,
+                registry.clone(), Arc::new(DeliveryRegistry::new()),
+                Arc::new(orbisync_domain::SystemClock::new()),
+            ).with_world_store(directory).with_tickets(Arc::new(ReviewUserVerifier(user))).build());
+            let payload = if resume {
+                let token = state.resume_store.issue(user, id, presence, 0, orbisync_domain::Revision::INITIAL);
+                envelope::Payload::ResumeSession(orbisync_protocol::v1::ResumeSession {
+                    resume_token: token, ..Default::default()
+                })
+            } else {
+                envelope::Payload::JoinInstance(orbisync_protocol::v1::JoinInstance { world_instance_id: id.to_string() })
+            };
+            let (socket, input, mut output) = RealtimeSocket::controlled();
+            let task = tokio::spawn(handle_socket(socket, state, Some(orbisync_protocol::WEBSOCKET_SUBPROTOCOL.into())));
+            input.send(admission88_hello()).await.unwrap();
+            assert!(matches!(review_receive(&mut output).await.payload, Some(envelope::Payload::ServerHello(_))));
+            input.send(Message::Binary(Envelope {
+                protocol_major: 1, sequence: 2, payload: Some(payload), ..Default::default()
+            }.encode_to_vec().into())).await.unwrap();
+            assert!(matches!(review_receive(&mut output).await.payload,
+                Some(envelope::Payload::Error(ref error)) if error.code == "INSTANCE_NOT_RUNNING"));
+            assert_eq!(registry.contains(id), resume, "join must not activate a stopped instance");
+            drop(input);
+            tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+        }
+    }
+}
+
 #[test]
 fn review_active_token_prune_then_disconnect_reclaims_actual_membership() {
     let (actor, instance, _, user, presence) = snapshot_fixture();

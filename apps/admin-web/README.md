@@ -168,6 +168,27 @@ a Web-managed installation, load its `secrets.json` pairs into the child process
 environment and pass `--config <dir>/orbisync.toml` and
 `--input-rules <dir>/input-rules.json`. Never put secrets in command arguments.
 
+## Guest participation
+
+In **Configuration → Guest participation**, enable guest participation and select
+the Worlds guests may join. Save, then restart the engine. The app must perform a
+new guest sign-in (leave and Join again in the local sample) to receive the new
+World scope. Instance IDs belong in the app; World choices belong in this setting.
+
+When no guest role is configured, saving prepares a `Guest` role with only
+`world.instance.read` through the ordinary roles API (`admin.roles.create` is
+required when the role is missing). Existing guest roles and lifetime settings are
+preserved and checked against the engine's temporary-subject permission ceiling.
+Missing/inactive Worlds, Instance IDs and roles without Join permission are
+rejected before the configuration is saved. Other authentication methods stay
+enabled when guest participation is toggled off. Existing installations attached
+with `--config` retain their read-only workflow.
+
+Run `node scripts/verify_admin_guest.cjs` with `ORBISYNC_ADMIN_TEST_BINARY` pointing
+to a built binary with its bundled PostgreSQL runtime. It creates its own private
+disposable installation and checks saving, restart, scope, actual SDK Join and
+initial synchronization, RBAC, and cleanup.
+
 ## Recovery and verification
 
 Validation/connection failures before initialization leave files/DB unchanged.

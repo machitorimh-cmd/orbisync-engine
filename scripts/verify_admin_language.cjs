@@ -28,9 +28,9 @@ const connectionJs = fs.readFileSync(path.join(root, 'apps/admin-web/src/local_c
       let data;
       if (p === '/admin/status') data = { initialized, ready: initialized, engine: initialized ? 'running' : 'not started', restart_required: true };
       else if (p === '/admin/initialize') { initialized = true; data = { temporary_password: 'temporary-fixture-secret', message: 'Initialized. Save the one-time password, start the engine, then sign in and change it.' }; }
-      else if (p === '/admin/settings') data = { values: { 'server.bind': '127.0.0.1:8080', 'world.default_capacity': 32 }, manifest: { version: 1, bindings: [] }, read_only: false };
+      else if (p === '/admin/settings') data = { values: { 'server.bind': '127.0.0.1:8080', 'world.default_capacity': 32 }, manifest: { version: 1, bindings: [] }, guest: {enabled: true, allowed_worlds: ['w1'], role_names: ['Guest']}, read_only: false };
       else if (p.endsWith('/auth/login')) data = { access_token: 'fixture-only' };
-      else if (p.endsWith('/auth/me')) data = { display_name: 'Users', login_id: 'operator' };
+      else if (p.endsWith('/auth/me')) data = { id: 'u1', display_name: 'Users', login_id: 'operator' };
       else if (p.endsWith('/users/u1/roles')) data = { role_ids: ['r1'] };
       else if (p.endsWith('/users')) data = { items: [{ id: 'u1', login_id: 'operator', display_name: 'Users', enabled: true }], next_cursor: 'next-fixture' };
       else if (p.endsWith('/roles')) data = { items: [{ id: 'r1', name: 'Roles', description: 'Description', permissions: ['admin.roles.assign'] }], next_cursor: null };
@@ -60,9 +60,9 @@ const connectionJs = fs.readFileSync(path.join(root, 'apps/admin-web/src/local_c
     await expect(page.locator('input[value=development]')).toBeChecked();
     await expect(page.locator('#devWarning')).toBeVisible();
     await page.locator('#checkConnection').click();
-    await expect(page.locator('#message')).toHaveText('サーバーからの応答: database.url: RAW diagnostic 日本語 / 42');
+    await expect(page.locator('#message')).toHaveText('サーバーからの応答: database.url: RAW diagnostic 日本語 / 42\nPOST · /admin/check · HTTP 400 · REQUEST_FAILED');
     await page.locator('#language').selectOption('en');
-    await expect(page.locator('#message')).toHaveText('Server response: database.url: RAW diagnostic 日本語 / 42');
+    await expect(page.locator('#message')).toHaveText('Server response: database.url: RAW diagnostic 日本語 / 42\nPOST · /admin/check · HTTP 400 · REQUEST_FAILED');
     await page.locator('#setupForm button[type=submit]').click();
     await expect(page.locator('#login')).toBeVisible();
     await page.locator('#loginPassword').fill('temporary-fixture-secret');
@@ -110,6 +110,12 @@ const connectionJs = fs.readFileSync(path.join(root, 'apps/admin-web/src/local_c
     await expect(page.locator('#instancesTable')).toContainText('running');
     await page.locator('[data-tab=config]').click();
     await expect(page.locator('#configFields input')).toHaveCount(2);
+    await expect(page.locator('#guestEnabled')).toBeChecked();
+    await expect(page.locator('#guestWorldChoices input[value=w1]')).toBeChecked();
+    await page.locator('#guestEnabled').uncheck();
+    await expect(page.locator('#guestWorldChoices input')).toBeDisabled();
+    await page.locator('#guestEnabled').check();
+    await expect(page.locator('#guestWorldChoices input[value=w1]')).toBeChecked();
     await page.locator('#configFields input').first().fill('127.0.0.1:8888');
     await page.locator('#replacementDb').fill('replacement-fixture');
     await page.locator('#manifest').fill('{ invalid raw json');
@@ -117,6 +123,9 @@ const connectionJs = fs.readFileSync(path.join(root, 'apps/admin-web/src/local_c
     await expect(page.locator('#message')).toContainText('Invalid JSON manifest.');
     await page.locator('#language').selectOption('ja');
     await expect(page.locator('#message')).toContainText('JSON マニフェストが不正です。');
+    await expect(page.locator('#guestSettings legend')).toHaveText('ゲスト参加');
+    await expect(page.locator('#guestEnabled')).toBeChecked();
+    await expect(page.locator('#guestWorldChoices input[value=w1]')).toBeChecked();
     await expect(page.locator('#manifest')).toHaveValue('{ invalid raw json');
     await expect(page.locator('#replacementDb')).toHaveValue('replacement-fixture');
     await expect(page.locator('#configFields input').first()).toHaveValue('127.0.0.1:8888');

@@ -1319,6 +1319,39 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 // `CheckpointStore::save_checkpoint` (`PgCheckpointStore`).
                 // Retention (latest 3 per instance / 30 days) is enforced by
                 // `PgCheckpointStore` after each save.
+                // Directory stop requests become terminal only after the actor
+                // has drained and its final checkpoint has been durably reaped.
+                let instance_stop_task = {
+                    let directory = PgWorldDirectoryStore::new(pool.clone(), &config, &env)?;
+                    let registry = Arc::clone(&runtime_registry);
+                    let shutdown = Arc::clone(&shutdown);
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        let mut cursor = None;
+                        loop {
+                            interval.tick().await;
+                            if shutdown.is_rejecting() { break; }
+                            let pass = async {
+                                let ids = directory.stopping_instances(cursor).await?;
+                                if ids.is_empty() { cursor = None; }
+                                for id in ids {
+                                    cursor = Some(id);
+                                    let Ok(_guard) = tokio::time::timeout(std::time::Duration::from_millis(50), registry.lifecycle_guard(id)).await else { continue; };
+                                    if !registry.contains(id) && directory.complete_stop(id).await? {
+                                        tracing::info!(event="instance.stopped", instance_id=%id);
+                                    }
+                                }
+                                Ok::<(), orbisync_application::ApplicationError>(())
+                            };
+                            match tokio::time::timeout(std::time::Duration::from_secs(2), pass).await {
+                                Ok(Ok(())) => {},
+                                Ok(Err(error)) => tracing::warn!(event="instance.stop_completion_failed", %error),
+                                Err(_) => tracing::warn!(event="instance.stop_completion_delayed"),
+                            }
+                        }
+                    })
+                };
                 let tick_task = if generation.is_some() { Some({
                     let tick_generation = generation.clone();
                     let tick_backlog = Arc::clone(&persistence_backlog);
@@ -1911,6 +1944,8 @@ fn run_configured(cli: Cli, env: impl EnvSource) -> Result<(), ServerError> {
                 // 7. Axum has finished its graceful listener/in-flight request
                 // shutdown; only now close the database pool.
                 operational_tasks.stop().await;
+                instance_stop_task.abort();
+                let _stop_task_joined = instance_stop_task.await;
                 if let Some(owner) = generation_ownership { owner.shutdown().await; }
                 pool.close().await;
                 tracing::info!(event = "database.pool_closed");

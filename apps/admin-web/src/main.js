@@ -158,6 +158,15 @@ const japanese = {
   'Enabled': '有効',
   'Disabled': '無効',
   'Disable': '無効にする',
+  'Guest participation': 'ゲスト参加',
+  'Allow guest participation': 'ゲスト参加を許可する',
+  'Guests can join only the Worlds selected below. A join-only Guest role is prepared automatically when needed.': 'ゲストは選択したWorldだけに参加できます。初回は参加用のGuestロールを自動で準備します。',
+  'After saving, restart the engine. In your app, leave and Join again to use the new guest settings.': '保存後にエンジンを再起動してください。アプリで退出して再度Joinすると、新しいゲスト設定が反映されます。',
+  'Load more Worlds': '追加のWorldを読み込む',
+  'Create an active World before enabling guest participation.': 'ゲスト参加を有効にする前に、参加先のWorldを作成してください。',
+  'Select at least one World for guest participation.': 'ゲストが参加できるWorldを1つ以上選択してください。',
+  'Saved. Restart the engine, then leave and Join again in your app to apply guest settings.': '保存しました。エンジンを再起動し、アプリで退出して再度Joinするとゲスト設定が反映されます。',
+  'Signed-in account. Disable it from another administrator account.': '現在ログイン中のアカウントです。無効化は別の管理者でログインして行ってください。',
   'Enable': '有効にする',
   'Reset password': 'パスワードをリセット',
   'Role': 'ロール',
@@ -183,6 +192,18 @@ const japanese = {
   'stopped; inspect server diagnostic and restart launcher': '停止済み。サーバーの診断情報を確認し、ランチャーを再起動してください',
   'Server response: ': 'サーバーからの応答: ',
   'Request failed': 'リクエストに失敗しました',
+  'Operation log': '操作ログ',
+  'Time': '時刻', 'Request': 'リクエスト', 'Result': '結果', 'Request ID': 'リクエストID',
+  'No operations yet.': '操作はまだありません。',
+  'Your administrator sign-in is no longer valid. Sign in again.': '管理者認証が無効になりました。再ログインしてください。',
+  'Keeping you signed in automatically.': 'ログインは自動で継続します。',
+  'Maintaining your sign-in…': 'ログインを継続中…',
+  'Reconnecting. Your sign-in and unsaved input are kept; operations resume when the engine is reachable.': '接続を回復しています。ログインと入力内容は保持しています。エンジンに接続できると操作を再開できます。',
+  'Instance created.': 'インスタンスを作成しました。',
+  'Instance started.': 'インスタンスを起動しました。',
+  'Instance stop requested. Waiting for participants and saved state to drain.': 'インスタンスの停止を要求しました。参加者の退出と保存処理が終わると停止済みになります。',
+  'Stopped instances cannot be started again. Create another instance in the same world.': '停止したインスタンスは再起動できません。同じワールドで新しいインスタンスを作成してください。',
+  'This page keeps the latest 50 requests without passwords, tokens or request bodies. Durable server results are saved in .orbisync-admin/admin.log; engine results are in engine.log.': 'この画面には直近50件のリクエストを表示します。パスワード・トークン・送信内容は記録しません。サーバーの結果は .orbisync-admin/admin.log、エンジンの結果は engine.log に保存します。',
   'Connection successful. Database is empty and eligible for initialization.': '接続できました。データベースは空で、初期化できます。',
   'Initialized. Save the one-time password, start the engine, then sign in and change it.': '初期化しました。一度だけ表示されるパスワードを保存し、エンジンを起動してログイン後に変更してください。',
   'Engine start requested. Readiness will confirm when it accepts requests.': 'エンジンの起動を要求しました。リクエストを受け付けるようになると準備完了と表示されます。',
@@ -270,16 +291,31 @@ try {
 } catch { /* The private link remains usable when browser storage is blocked. */ }
 history.replaceState(null, '', location.pathname);
 let accessToken = null;
+let signedInUserId = null;
+let refreshToken = null;
+let refreshPromise = null;
+let sessionEpoch = 0;
+let sessionTimer = null;
+let refreshAt = Infinity;
+let instancePollTimer = null;
 let lastStatus = null;
 let statusRequestEpoch = 0;
 let startupUi = null;
 let assignedIds = [];
+let guestSettingsLoaded = false, guestReadOnly = true, guestWorlds = [], guestWorldCursor = null, guestWorldEpoch = 0;
+let guestAllowedWorlds = new Set();
 const pages = {};
 const records = { users: [], roles: [], worlds: [], instances: [] };
 function notice(message, error = false, raw = true) { $('message').hidden = false; localized($('message'), () => raw ? t('Server response: ') + message : t(message)); $('message').classList.toggle('error', error); }
 function errorNotice(error) {
   notice(error.message, true);
   if (error.uiRender) localized($('message'), error.uiRender);
+  const context = [error.method, error.path, error.status && `HTTP ${error.status}`, error.code, error.requestId].filter(Boolean).join(' · ');
+  if (context) {
+    const render = error.uiRender || (() => t('Server response: ') + error.message);
+    localized($('message'), () => `${render()}\n${context}`);
+  }
+  $('message').scrollIntoView({block: 'nearest'});
 }
 function parseManifest() {
   try { return JSON.parse($('manifest').value); }
@@ -300,7 +336,89 @@ function uuid7() {
   const h = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
   return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
 }
-async function request(path, method = 'GET', body, extra = {}) {
+function recordRequest(path, method, status, data, response, started) {
+  if (method === 'GET' && status >= 200 && status < 300) return;
+  const row = document.createElement('tr');
+  const safe = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : '';
+  // Route labels only: no query strings, credentials, IDs or response messages.
+  const route = path.split('?')[0].replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, '{id}');
+  const requestId = safe(response?.headers.get('x-request-id') || data?.error?.request_id)
+    || safe(response?.headers.get('x-orbisync-admin-request-id'));
+  const code = safe(data?.error?.code || data?.code);
+  for (const value of [new Date().toLocaleTimeString(), `${method} ${route}`, `${status || 'NETWORK_ERROR'} ${code} (${Math.round(performance.now() - started)} ms)`, requestId]) {
+    const cell = row.insertCell(); cell.textContent = value;
+  }
+  $('operationRows').prepend(row);
+  while ($('operationRows').children.length > 50) $('operationRows').lastChild.remove();
+  $('noOperations').hidden = true;
+  if (status === 0 || status >= 400) $('operationLog').open = true;
+}
+function cancelSessionTimer() {
+  if (sessionTimer !== null) clearTimeout(sessionTimer);
+  sessionTimer = null;
+}
+function scheduleSessionCheck(delay = Math.max(1000, refreshAt - Date.now())) {
+  cancelSessionTimer();
+  if (!accessToken || !refreshToken) return;
+  sessionTimer = setTimeout(() => {
+    sessionTimer = null;
+    void maintainSession().catch(error => { if (error.sessionRejected) errorNotice(error); });
+  }, Math.min(delay, 2147483647));
+}
+function planSessionRefresh(expiresIn) {
+  // The server supplies expires_in. Leave a margin for network latency and
+  // renew even while the operator is watching a background tab.
+  const seconds = Number(expiresIn);
+  const ttl = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 900000;
+  refreshAt = Date.now() + Math.max(1000, ttl - Math.min(60000, ttl / 5));
+  localized($('sessionContinuity'), refreshToken ? 'Keeping you signed in automatically.' : '');
+  scheduleSessionCheck();
+}
+async function maintainSession(force = false) {
+  if (!accessToken || !refreshToken) return;
+  if (!force && Date.now() < refreshAt) { scheduleSessionCheck(); return; }
+  const epoch = sessionEpoch;
+  localized($('sessionContinuity'), 'Maintaining your sign-in…');
+  try { await refreshSession(); }
+  catch (error) {
+    if (epoch === sessionEpoch) {
+      if (error.status === 401 || error.status === 403) {
+        clearSession(); error.sessionRejected = true;
+        error.uiRender = () => t('Your administrator sign-in is no longer valid. Sign in again.');
+      } else {
+        // An outage is not evidence that the operator logged out. Preserve
+        // credentials and edits; retry without sending a management mutation.
+        localized($('sessionContinuity'), 'Reconnecting. Your sign-in and unsaved input are kept; operations resume when the engine is reachable.');
+        error.uiRender = () => t('Reconnecting. Your sign-in and unsaved input are kept; operations resume when the engine is reachable.');
+        refreshAt = Math.min(refreshAt, Date.now());
+        scheduleSessionCheck(5000);
+      }
+    }
+    throw error;
+  }
+}
+function resumeSession() {
+  void maintainSession().catch(error => { if (error.sessionRejected) errorNotice(error); });
+}
+window.addEventListener('focus', resumeSession);
+window.addEventListener('online', resumeSession);
+window.addEventListener('pageshow', resumeSession);
+window.addEventListener('pagehide', cancelSessionTimer);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeSession(); });
+async function refreshSession() {
+  if (refreshPromise) return refreshPromise;
+  const epoch = sessionEpoch, token = refreshToken;
+  const pending = (async () => {
+    const session = await request('/api/v1/auth/refresh', 'POST', {refresh_token: token}, {}, false);
+    if (sessionEpoch !== epoch) throw new Error('Session changed');
+    if (!session?.access_token || !session?.refresh_token) throw new Error('Invalid refresh response');
+    accessToken = session.access_token; refreshToken = session.refresh_token;
+    planSessionRefresh(session.expires_in);
+  })();
+  refreshPromise = pending;
+  try { await pending; } finally { if (refreshPromise === pending) refreshPromise = null; }
+}
+async function request(path, method = 'GET', body, extra = {}, retry = true) {
   const headers = { 'x-orbisync-local': capability, ...extra };
   const pathname = path.split('?')[0];
   // Startup/status operations use only the local capability. In particular,
@@ -308,17 +426,37 @@ async function request(path, method = 'GET', body, extra = {}) {
   // Probe accepts the current signed-in identity, or the backend's local-trial
   // credentials when no token is available.
   const bearerRequired = pathname.startsWith('/api/v1/') || pathname === '/admin/settings' || pathname === '/admin/probe';
+  const sessionRequest = !['/api/v1/auth/login', '/api/v1/auth/refresh'].includes(pathname);
+  // Timers can be suspended by sleep or browser throttling. Recover before
+  // sending an operator's request, rather than letting the first write fail.
+  if (retry && bearerRequired && sessionRequest && accessToken && refreshToken && Date.now() >= refreshAt) await maintainSession();
   for (const name of Object.keys(headers)) if (name.toLowerCase() === 'authorization') delete headers[name];
-  if (accessToken && bearerRequired) headers.Authorization = `Bearer ${accessToken}`;
+  const sentToken = accessToken;
+  const requestEpoch = sessionEpoch;
+  if (sentToken && bearerRequired) headers.Authorization = `Bearer ${sentToken}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET') headers['Idempotency-Key'] = uuid7();
-  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
+  const started = performance.now();
+  let response;
+  try { response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }); }
+  catch (error) { recordRequest(path, method, 0, null, null, started); throw error; }
   const text = await response.text(); let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* Error bodies may be plain text. */ }
+  recordRequest(path, method, response.status, data, response, started);
+  if (response.status === 401 && sentToken && sessionRequest && retry && refreshToken && sessionEpoch === requestEpoch) {
+    if (accessToken === sentToken) await maintainSession(true);
+    if (accessToken && sessionEpoch === requestEpoch) return request(path, method, body, extra, false);
+  }
   if (!response.ok) {
     const raw = data?.error?.message || data?.message;
     const error = new Error(raw || text);
+    error.method = method; error.path = pathname; error.status = response.status;
+    error.requestId = data?.error?.request_id || response.headers.get('x-request-id') || response.headers.get('x-orbisync-admin-request-id');
     error.code = data?.error?.code || data?.code || (response.status === 401 ? 'AUTHENTICATION_REQUIRED' : response.status === 403 ? 'FORBIDDEN' : 'REQUEST_FAILED');
+    if (response.status === 401 && sentToken && sessionRequest) {
+      if (sessionEpoch === requestEpoch) clearSession();
+      error.uiRender = () => t('Your administrator sign-in is no longer valid. Sign in again.'); throw error;
+    }
     if (raw) throw error;
     error.uiRender = () => `${t('Request failed')} (${response.status}). ${response.status === 403 ? t('Open the private URL printed by this launcher, or sign in with the required role.') : ''}${text ? `\n${text}` : ''}`;
     throw error;
@@ -359,15 +497,24 @@ action('setupForm', async () => {
   credential(result.temporary_password); uiNotice(result.message); await refreshStatus();
 }, 'submit');
 function clearSession() {
-  accessToken = null; $('session').hidden = true; $('management').hidden = true; $('login').hidden = false;
+  if (instancePollTimer !== null) clearTimeout(instancePollTimer);
+  instancePollTimer = null;
+  cancelSessionTimer(); refreshAt = Infinity; localized($('sessionContinuity'), '');
+  sessionEpoch += 1; accessToken = null; signedInUserId = null; refreshToken = null; refreshPromise = null; $('session').hidden = true; $('management').hidden = true; $('login').hidden = false;
   $('currentPassword').value = ''; $('newPassword').value = ''; clearCredential();
   for (const name of Object.keys(records)) { records[name] = []; pages[name] = null; $(`${name}Table`).replaceChildren(); }
   $('roleChoices').replaceChildren(); $('assignUser').replaceChildren(); $('manifest').value = ''; $('configFields').replaceChildren();
+  guestWorldEpoch++; guestSettingsLoaded = false; guestAllowedWorlds.clear(); guestWorlds = [];
+  $('guestEnabled').checked = false; $('guestEnabled').disabled = true; $('guestWorldChoices').replaceChildren(); $('moreGuestWorlds').hidden = true;
   startupUi?.authChanged();
 }
-async function signedIn(token, trial = false) {
-  accessToken = token; $('loginPassword').value = '';
-  const me = await api('auth/me'); localized($('signedIn'), () => `${t('Signed in as ')}${me.display_name} (${me.login_id})`);
+async function signedIn(token, trial = false, refresh = null, expiresIn = null) {
+  const epoch = ++sessionEpoch; accessToken = token; signedInUserId = null; refreshToken = refresh; $('loginPassword').value = '';
+  planSessionRefresh(expiresIn);
+  const me = await api('auth/me');
+  if (sessionEpoch !== epoch) return;
+  signedInUserId = me.id;
+  localized($('signedIn'), () => `${t('Signed in as ')}${me.display_name} (${me.login_id})`);
   $('session').hidden = false; $('management').hidden = false; $('login').hidden = true; $('passwordDetails').open = !trial;
   uiNotice(trial ? 'Signed in to your local trial.' : 'Signed in. If this is a temporary password, change it now.');
   try { await loadUsers(); await loadRoles(); } catch (error) { if (trial) throw error; errorNotice(error); }
@@ -375,7 +522,7 @@ async function signedIn(token, trial = false) {
 }
 action('loginForm', async () => {
   const result = await api('auth/login', 'POST', {login_id: $('loginId').value, password: $('loginPassword').value});
-  await signedIn(result.access_token);
+  await signedIn(result.access_token, false, result.refresh_token, result.expires_in);
 }, 'submit');
 action('logout', async () => { try {await api('auth/logout', 'POST');} finally {clearSession(); uiNotice('Signed out.');} });
 action('passwordForm', async () => {await api('auth/change-password', 'POST', {current_password: $('currentPassword').value, new_password: $('newPassword').value}); clearSession(); uiNotice('Password changed. Sign in with your new password.');}, 'submit');
@@ -396,7 +543,24 @@ async function page(name, more = false) {
 }
 async function loadUsers(more = false) {
   const users = await page('users', more);
-  table('usersTable', ['Login / ID', 'Name', 'Status', 'Actions'], users.map(u => [ `${u.login_id}\n${u.id}`, u.display_name, uiText(u.enabled ? 'Enabled' : 'Disabled'), buttons([[u.enabled ? 'Disable' : 'Enable', async () => {await api(`users/${u.id}/${u.enabled ? 'disable' : 'enable'}`, 'POST'); await loadUsers();}], ['Reset password', async () => {const result = await api(`users/${u.id}/reset-password`, 'POST'); credential(result.temporary_password);} ]]) ]));
+  table('usersTable', ['Login / ID', 'Name', 'Status', 'Actions'], users.map(u => {
+    const ownAccount = u.id === signedInUserId;
+    const specs = [];
+    // Keep the general engine API's explicit account-disable behavior. The
+    // management UI must not let an operator accidentally revoke its own login.
+    if (!ownAccount) specs.push([u.enabled ? 'Disable' : 'Enable', async () => {
+      if (u.id === signedInUserId) return;
+      await api(`users/${u.id}/${u.enabled ? 'disable' : 'enable'}`, 'POST'); await loadUsers();
+    }]);
+    specs.push(['Reset password', async () => {const result = await api(`users/${u.id}/reset-password`, 'POST'); credential(result.temporary_password);}]);
+    const actions = buttons(specs);
+    if (ownAccount) {
+      const help = document.createElement('p'); help.className = 'muted';
+      localized(help, 'Signed-in account. Disable it from another administrator account.');
+      actions.prepend(help);
+    }
+    return [`${u.login_id}\n${u.id}`, u.display_name, uiText(u.enabled ? 'Enabled' : 'Disabled'), actions];
+  }));
   const selected = $('assignUser').value; $('assignUser').replaceChildren();
   for (const u of users) {const opt = new Option(`${u.login_id} — ${u.display_name}`, u.id); $('assignUser').add(opt);}
   if (users.some(u => u.id === selected)) $('assignUser').value = selected;
@@ -425,11 +589,54 @@ $('assignUser').addEventListener('change', () => loadAssignments().catch(error =
 action('assignForm', async () => {const visible = [...$('roleChoices').querySelectorAll('input')].map(c => c.value); const role_ids = [...assignedIds.filter(id => !visible.includes(id)), ...[...$('roleChoices').querySelectorAll('input:checked')].map(c => c.value)]; await api(`users/${$('assignUser').value}/roles`, 'PUT', {role_ids}); uiNotice('Role assignments saved.');}, 'submit');
 action('refreshRoles', () => loadRoles()); action('moreRoles', () => loadRoles(true));
 action('roleForm', async () => {await api('roles', 'POST', {name: $('roleName').value, description: $('roleDescription').value || null, permissions: $('rolePermissions').value.split(/\r?\n/).map(v => v.trim()).filter(Boolean)}); $('roleForm').reset(); await loadRoles(); uiNotice('Role created.');}, 'submit');
-async function loadWorlds(more = false) {const worlds = await page('worlds', more); table('worldsTable', ['World / ID', 'Status', 'Actions'], worlds.map(w => [`${w.name}\n${w.id}`, uiText(w.status), buttons([['Create instance', async () => {await api('instances', 'POST', {world_id: w.id}); await loadInstances();}]])]));}
-async function loadInstances(more = false) {const instances = await page('instances', more); table('instancesTable', ['Instance', 'World', 'Status', 'Actions'], instances.map(i => [i.id, records.worlds.find(w => w.id === i.world_id)?.name || i.world_id, uiText(i.status), buttons(['start', 'stop'].map(op => [op === 'start' ? 'Start' : 'Stop', async () => {await api(`instances/${i.id}/${op}`, 'POST'); await loadInstances();}]))]));}
+async function loadWorlds(more = false) {const worlds = await page('worlds', more); table('worldsTable', ['World / ID', 'Status', 'Actions'], worlds.map(w => [`${w.name}\n${w.id}`, uiText(w.status), w.status === 'active' ? buttons([['Create instance', async () => {await api('instances', 'POST', {world_id: w.id}); await loadInstances(); uiNotice('Instance created.');}]]) : '']));}
+async function loadInstances(more = false) {
+  if (instancePollTimer !== null) clearTimeout(instancePollTimer);
+  instancePollTimer = null;
+  const instances = await page('instances', more);
+  table('instancesTable', ['Instance', 'World', 'Status', 'Actions'], instances.map(i => {
+    const operations = i.status === 'created' ? ['start', 'stop'] : i.status === 'running' ? ['stop'] : [];
+    const controls = buttons(operations.map(op => [op === 'start' ? 'Start' : 'Stop', async () => {
+      await api(`instances/${i.id}/${op}`, 'POST'); await loadInstances();
+      uiNotice(op === 'start' ? 'Instance started.' : 'Instance stop requested. Waiting for participants and saved state to drain.');
+    }]));
+    if (!operations.length) controls.append(uiText('Stopped instances cannot be started again. Create another instance in the same world.'));
+    return [i.id, records.worlds.find(w => w.id === i.world_id)?.name || i.world_id, uiText(i.status), controls];
+  }));
+  if (accessToken && !$('worlds').hidden && instances.some(i => i.status === 'stopping')) {
+    instancePollTimer = setTimeout(() => { instancePollTimer = null; void loadInstances().catch(errorNotice); }, 2000);
+  }
+}
 action('refreshWorlds', async () => {await loadWorlds(); await loadInstances();}); action('moreWorlds', () => loadWorlds(true)); action('moreInstances', () => loadInstances(true));
 action('worldForm', async () => {await api('worlds', 'POST', {name: $('worldName').value, capacity: Number($('worldCapacity').value)}); $('worldName').value = ''; await loadWorlds(); uiNotice('World created.');}, 'submit');
 const labels = {'server.bind':'Engine address', 'database.max_connections':'Database pool limit', 'database.acquire_timeout_seconds':'Database acquire timeout (seconds)', 'database.readiness_timeout_seconds':'Readiness timeout (seconds)', 'realtime.max_connections':'Realtime connection limit', 'world.default_capacity':'Default world capacity'};
+function renderGuestWorlds() {
+  $('guestWorldChoices').replaceChildren();
+  const available = new Map(guestWorlds.map(world => [world.id, world]));
+  // Keep configured choices that are on later pages. Loading or toggling the
+  // mode must never silently erase a saved World selection.
+  for (const id of guestAllowedWorlds) if (!available.has(id)) available.set(id, {id, name: ''});
+  for (const world of available.values()) {
+    if (world.status && world.status !== 'active' && !guestAllowedWorlds.has(world.id)) continue;
+    const label = document.createElement('label'), check = document.createElement('input');
+    check.type = 'checkbox'; check.value = world.id; check.checked = guestAllowedWorlds.has(world.id);
+    check.disabled = guestReadOnly || !$('guestEnabled').checked;
+    check.addEventListener('change', () => {if (check.checked) guestAllowedWorlds.add(world.id); else guestAllowedWorlds.delete(world.id);});
+    label.append(check, ` ${world.name ? world.name + ' — ' : ''}${world.id}`); $('guestWorldChoices').append(label);
+  }
+  if (!available.size) {const text = document.createElement('p'); localized(text, 'Create an active World before enabling guest participation.'); $('guestWorldChoices').append(text);}
+  $('moreGuestWorlds').hidden = !guestWorldCursor;
+  $('moreGuestWorlds').disabled = guestReadOnly;
+}
+async function loadGuestWorlds(more = false) {
+  const epoch = guestWorldEpoch, session = sessionEpoch;
+  const result = await api(`worlds?limit=50${more && guestWorldCursor ? '&cursor=' + encodeURIComponent(guestWorldCursor) : ''}`);
+  if (guestWorldEpoch !== epoch || sessionEpoch !== session) return;
+  guestWorlds = more ? [...guestWorlds, ...result.items] : result.items; guestWorldCursor = result.next_cursor;
+  renderGuestWorlds();
+}
+$('guestEnabled').addEventListener('change', renderGuestWorlds);
+action('moreGuestWorlds', () => loadGuestWorlds(true));
 async function loadSettings() {
   const result = await request('/admin/settings'); $('configFields').replaceChildren();
   for (const [key, value] of Object.entries(result.values)) {const label = document.createElement('label'), input = document.createElement('input'); label.append(uiText(labels[key] || key)); input.value = value; input.dataset.key = key; input.disabled = result.read_only; label.append(input); $('configFields').append(label);}
@@ -439,12 +646,25 @@ async function loadSettings() {
   for (const id of ['manifest', 'replacementDb', 'saveSettings']) $(id).disabled = result.read_only;
   if (lastStatus?.local_trial) $('replacementDb').disabled = true;
   $('managedDatabaseHint').hidden = !lastStatus?.local_trial;
+  guestWorldEpoch++; guestReadOnly = result.read_only; guestSettingsLoaded = !!result.guest;
+  $('guestSettings').hidden = !guestSettingsLoaded;
+  guestAllowedWorlds = new Set(result.guest?.allowed_worlds || []); guestWorlds = []; guestWorldCursor = null;
+  $('guestEnabled').checked = result.guest?.enabled === true; $('guestEnabled').disabled = guestReadOnly;
+  renderGuestWorlds();
+  if (guestSettingsLoaded) await loadGuestWorlds();
   if (result.read_only) uiNotice('Existing configuration is read-only. Use its original operator workflow for changes.');
 }
 action('refreshSettings', loadSettings);
-action('settingsForm', async () => {const values = Object.fromEntries([...$('configFields').querySelectorAll('input')].map(i => [i.dataset.key, i.value])); await request('/admin/settings', 'POST', {values, database_url: $('replacementDb').value, manifest: parseManifest()}); $('replacementDb').value = ''; uiNotice('Saved. Restart the engine to apply changes.'); await refreshStatus();}, 'submit');
+action('settingsForm', async () => {
+  const values = Object.fromEntries([...$('configFields').querySelectorAll('input')].map(i => [i.dataset.key, i.value]));
+  const guest = guestSettingsLoaded ? {enabled: $('guestEnabled').checked, allowed_worlds: [...guestAllowedWorlds]} : undefined;
+  if (guest?.enabled && !guest.allowed_worlds.length) {uiNotice('Select at least one World for guest participation.', true); return;}
+  await request('/admin/settings', 'POST', {values, database_url: $('replacementDb').value, manifest: parseManifest(), guest});
+  $('replacementDb').value = ''; uiNotice(guestSettingsLoaded ? 'Saved. Restart the engine, then leave and Join again in your app to apply guest settings.' : 'Saved. Restart the engine to apply changes.'); await refreshStatus();
+}, 'submit');
 for (const button of document.querySelectorAll('[data-tab]')) button.addEventListener('click', async () => {
   const name = button.dataset.tab;
+  if (name !== 'worlds' && instancePollTimer !== null) { clearTimeout(instancePollTimer); instancePollTimer = null; }
   for (const b of document.querySelectorAll('[data-tab]')) {b.setAttribute('aria-selected', String(b === button)); $(b.dataset.tab).hidden = b !== button;}
   try {if (name === 'worlds') {await loadWorlds(); await loadInstances();} else if (name === 'config') await loadSettings(); else if (name === 'roles') await loadRoles(); else await loadUsers();} catch (error) {errorNotice(error);}
 });
@@ -459,7 +679,7 @@ startupUi = createLocalConnection({ request, refreshStatus, localize: localized,
     if (typeof result.initial_password === 'string') credential(result.initial_password, true);
     if (typeof result.login_id === 'string') $('loginId').value = result.login_id;
     if (typeof result.access_token !== 'string' || !result.access_token) throw new Error('Local sign-in failed');
-    await signedIn(result.access_token, true);
+    await signedIn(result.access_token, true, result.refresh_token, result.expires_in);
   },
   showManual: () => { $('setup').hidden = false; manualSetup.open = true; $('databaseUrl').focus(); },
 });

@@ -160,10 +160,12 @@ def main():
             result = app.call("/admin/initialize", "POST", setup)
             initial_password = result["temporary_password"]
             assert app.call("/admin/status")["initialized"]
-            snapshot = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+            # Request logs legitimately change during rejected operations;
+            # installation/configuration bytes must remain unchanged.
+            snapshot = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file() and p.suffix != ".log"}
             app.call("/admin/initialize", "POST", setup, expected=400)
             app.call("/admin/check", "POST", setup, expected=400)
-            assert snapshot == {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+            assert snapshot == {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file() and p.suffix != ".log"}
             app.start()
             app.call("/admin/settings", expected=401)
             app.login("operator", initial_password)

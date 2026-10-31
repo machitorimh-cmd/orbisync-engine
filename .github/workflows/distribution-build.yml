@@ -129,6 +129,21 @@ jobs:
           executable = 'orbisync-server.exe' if os.name == 'nt' else 'orbisync-server'
           binary = Path(os.environ['CONSUMER_EXTRACTED']) / f"orbisync-{os.environ['PACKAGE_VERSION']}-{platform}" / executable
           subprocess.run([sys.executable, 'scripts/verify_local_trial_recovery.py', '--binary', str(binary)], check=True)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+      - name: Guest participation settings with the actual bundled server
+        shell: python
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+        run: |
+          import os, subprocess
+          from pathlib import Path
+          platform = 'windows-x86_64' if os.name == 'nt' else 'linux-x86_64'
+          executable = 'orbisync-server.exe' if os.name == 'nt' else 'orbisync-server'
+          binary = Path(os.environ['CONSUMER_EXTRACTED']) / f"orbisync-{os.environ['PACKAGE_VERSION']}-{platform}" / executable
+          env = dict(os.environ, ORBISYNC_ADMIN_TEST_BINARY=str(binary.resolve()))
+          subprocess.run(['node', 'scripts/verify_admin_guest.cjs', '--http-only'], env=env, check=True)
       - name: Upload only verified public distribution files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

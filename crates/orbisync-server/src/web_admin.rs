@@ -61,6 +61,7 @@ struct WebState {
     operation: std::sync::Mutex<Value>,
     status_cache: std::sync::Mutex<Value>,
     busy: std::sync::atomic::AtomicBool,
+    request_log: std::sync::Mutex<std::fs::File>,
 }
 
 pub(super) fn run(
@@ -96,6 +97,7 @@ pub(super) fn run(
         let address = listener.local_addr().map_err(ServerError::Listener)?;
         let origin = format!("http://{address}");
         let capability = random_secret();
+        let request_log = private_log(&dir.join("admin.log")).map_err(|_| ServerError::Bootstrap)?;
         let state = Arc::new(WebState {
             install: Mutex::new(Installation {
                 dir,
@@ -112,6 +114,7 @@ pub(super) fn run(
             operation: std::sync::Mutex::new(json!({"phase":"idle","busy":false,"error_code":null})),
             status_cache: std::sync::Mutex::new(json!({"initialized":false,"existing":existing.is_some(),"engine":"not started","ready":false,"restart_required":false})),
             busy: std::sync::atomic::AtomicBool::new(false),
+            request_log: std::sync::Mutex::new(request_log),
             client: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -173,6 +176,51 @@ pub(super) fn run(
 }
 
 async fn protect(State(state): State<Arc<WebState>>, request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let method = request.method().to_string();
+    // Route templates exclude IDs, query strings, credentials and request bodies.
+    let matched_route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", axum::extract::MatchedPath::as_str)
+        .to_owned();
+    let route = if matched_route == "/api/{*path}" {
+        let segments: Vec<_> = request
+            .uri()
+            .path()
+            .split('/')
+            .map(|part| match part {
+                ""
+                | "api"
+                | "v1"
+                | "auth"
+                | "users"
+                | "roles"
+                | "worlds"
+                | "instances"
+                | "login"
+                | "logout"
+                | "refresh"
+                | "me"
+                | "change-password"
+                | "reset-password"
+                | "start"
+                | "stop"
+                | "enable"
+                | "disable"
+                | "members"
+                | "kick"
+                | "realtime"
+                | "tickets"
+                | "administration-access" => part,
+                _ => "{id}",
+            })
+            .collect();
+        segments.join("/")
+    } else {
+        matched_route
+    };
+    let request_id = format!("admin_{}", Uuid::now_v7());
     let host = state.origin.strip_prefix("http://").unwrap_or_default();
     let headers = request.headers();
     let valid_host = headers.get("host").and_then(|v| v.to_str().ok()) == Some(host);
@@ -187,10 +235,40 @@ async fn protect(State(state): State<Arc<WebState>>, request: Request, next: Nex
         .get("x-orbisync-local")
         .and_then(|v| v.to_str().ok())
         == Some(state.capability.as_str());
-    if !valid_host || !valid_origin || (!public_asset && !authorized) {
-        return StatusCode::FORBIDDEN.into_response();
+    let mut response = if !valid_host || !valid_origin || (!public_asset && !authorized) {
+        StatusCode::FORBIDDEN.into_response()
+    } else {
+        next.run(request).await
+    };
+    let engine_request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|id| {
+            id.len() <= 80
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        });
+    // Successful status polling is intentionally omitted. Mutations and failures
+    // are durable even though web-admin does not install the engine subscriber.
+    if method != "GET" || !response.status().is_success() {
+        let entry = json!({"timestamp":time::OffsetDateTime::now_utc().unix_timestamp(),
+            "event":"admin.request_completed","request_id":request_id,"engine_request_id":engine_request_id,
+            "method":method,"route":route,"status":response.status().as_u16(),"duration_ms":started.elapsed().as_millis() as u64});
+        let mut log = state.request_log.lock().unwrap_or_else(|e| e.into_inner());
+        if log.metadata().is_ok_and(|m| m.len() > 16 * 1024 * 1024) {
+            let _truncated = log.set_len(0);
+        }
+        if writeln!(log, "{entry}").and_then(|()| log.flush()).is_err() {
+            eprintln!("admin.request_log_write_failed");
+        }
     }
-    let mut response = next.run(request).await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response
+            .headers_mut()
+            .insert("x-orbisync-admin-request-id", value);
+    }
     for (name, value) in [
         ("cache-control", "no-store"),
         ("referrer-policy", "no-referrer"),
@@ -577,8 +655,13 @@ async fn settings(
         )
         .map_err(io_error)?
     };
+    let guest = json!({
+        "enabled":config.auth.methods.iter().any(|method| method == "guest"),
+        "allowed_worlds":config.auth.guest.allowed_worlds,
+        "role_names":config.auth.guest.role_names,
+    });
     Ok(Json(
-        json!({"values":values,"manifest":manifest,"read_only":install.existing,"restart_required":install.restart_required}),
+        json!({"values":values,"manifest":manifest,"guest":guest,"read_only":install.existing,"restart_required":install.restart_required}),
     ))
 }
 #[derive(Deserialize)]
@@ -587,6 +670,8 @@ struct SettingsEdit {
     #[serde(default)]
     database_url: String,
     manifest: Value,
+    #[serde(default)]
+    guest: Option<GuestSettingsEdit>,
 }
 async fn save_settings(
     State(state): State<Arc<WebState>>,
@@ -630,6 +715,9 @@ async fn save_settings(
         };
         section.insert(field.into(), val);
     }
+    if let Some(guest) = &body.guest {
+        edit_guest_config(&mut config, &mut table, guest)?;
+    }
     config
         .validate()
         .map_err(|e| bad(format!("{}: {}", e.key(), e.detail())))?;
@@ -648,6 +736,9 @@ async fn save_settings(
             .map_err(|_| bad("Invalid input policy."))?,
     );
     manifest.register(Arc::new(transport)).await.map_err(bad)?;
+    if body.guest.is_some() && config.auth.methods.iter().any(|method| method == "guest") {
+        validate_guest_setup(&state, &mut install, &headers, &config, &body.database_url).await?;
+    }
     if !body.database_url.is_empty() {
         let pool = connect(&body.database_url).await?;
         // Database replacement must be an existing engine DB, never initialize here.
@@ -684,7 +775,7 @@ async fn save_settings(
     .map_err(io_error)?;
     install.restart_required = true;
     Ok(Json(
-        json!({"message":"Saved. Restart the launcher and click Start engine to apply. Running engine is unchanged.","restart_required":true}),
+        json!({"message":"Saved. Restart the engine to apply changes. Guest settings apply to new guest sign-ins; leave and Join again in the app.","restart_required":true}),
     ))
 }
 async fn proxy(State(state): State<Arc<WebState>>, request: Request) -> Response {
@@ -742,7 +833,7 @@ async fn proxy(State(state): State<Arc<WebState>>, request: Request) -> Response
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
     let mut response = (status, Body::from(bytes)).into_response();
-    for name in ["content-type", "etag", "retry-after"] {
+    for name in ["content-type", "etag", "retry-after", "x-request-id"] {
         if let Some(value) = headers.get(name) {
             response
                 .headers_mut()
@@ -888,3 +979,4 @@ fn open_browser(url: &str) {
 }
 
 include!("web_admin_local.rs");
+include!("web_admin_guest.rs");

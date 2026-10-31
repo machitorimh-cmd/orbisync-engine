@@ -165,6 +165,7 @@ async fn start_installation(state: &WebState, install: &mut Installation) -> Web
             .as_mut()
             .ok_or_else(|| local_error("database_unavailable"))?;
         let url = database.start().await.map_err(database_error)?;
+        let migration_url = database.migration_database_url();
         let config = install.config()?;
         let mut secrets: BTreeMap<String, String> = serde_json::from_slice(
             &std::fs::read(install.dir.join("secrets.json")).map_err(io_error)?,
@@ -174,6 +175,13 @@ async fn start_installation(state: &WebState, install: &mut Installation) -> Web
             return Err(local_error("database_identity_mismatch"));
         }
         secrets.clear();
+        // This verified, launcher-owned trial is upgradeable. Ordinary
+        // operator/external databases keep their explicit migration workflow.
+        let migration_pool = create_pool(&config.database, &migration_url)
+            .map_err(|_| local_error("database_migration_failed"))?;
+        let migrated = run_migrations(&migration_pool).await;
+        migration_pool.close().await;
+        migrated.map_err(|_| local_error("database_migration_failed"))?;
     }
     if let Some(engine) = install.engine.as_mut()
         && engine.try_wait().map_err(io_error)?.is_none()
@@ -489,17 +497,18 @@ async fn create_or_resume_trial(state: &Arc<WebState>) -> WebResult<Value> {
         set_phase(state, "initializing");
         recover_trial_setup(&mut *state.install.lock().await).await?;
     }
-    let token = {
+    let session = {
         let mut install = state.install.lock().await;
         start_installation(state, &mut install).await?;
-        trial_access_token(state, &mut install).await?
+        trial_session(state, &mut install).await?
     };
     let mut metadata: TrialMetadata = read_private_json(&directory.join(TRIAL_METADATA_FILE))?;
     metadata.complete = true;
     save_private_json(&directory.join(TRIAL_METADATA_FILE), &metadata)?;
     let credentials: TrialCredentials =
         read_private_json(&directory.join(TRIAL_CREDENTIALS_FILE))?;
-    let mut response = json!({"ok":true,"login_id":credentials.login_id,"access_token":token});
+    let mut response = json!({"ok":true,"login_id":credentials.login_id,
+        "access_token":session["access_token"],"refresh_token":session["refresh_token"],"expires_in":session["expires_in"]});
     if first {
         response["initial_password"] = json!(credentials.password);
     }
@@ -655,6 +664,11 @@ async fn login_trial(
         .map_err(|_| local_error("authentication_failed"))
 }
 async fn trial_access_token(state: &WebState, install: &mut Installation) -> WebResult<String> {
+    trial_session(state, install).await?
+        .get("access_token").and_then(Value::as_str).map(str::to_owned)
+        .ok_or_else(|| local_error("authentication_failed"))
+}
+async fn trial_session(state: &WebState, install: &mut Installation) -> WebResult<Value> {
     let path = install.dir.join(TRIAL_CREDENTIALS_FILE);
     if !path.is_file() {
         return Err(local_error("trial_credentials_missing"));
@@ -672,11 +686,7 @@ async fn trial_access_token(state: &WebState, install: &mut Installation) -> Web
             credentials.password.as_bytes(),
         )
         .map_err(io_error)?;
-        return session
-            .get("access_token")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| local_error("authentication_failed"));
+        return Ok(session);
     }
     let mut session =
         login_trial(state, install, &credentials.login_id, &credentials.password).await?;
@@ -724,11 +734,7 @@ async fn trial_access_token(state: &WebState, install: &mut Installation) -> Web
         credentials.password.as_bytes(),
     )
     .map_err(io_error)?;
-    session
-        .get("access_token")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| local_error("authentication_failed"))
+    Ok(session)
 }
 
 async fn diagnostics(State(state): State<Arc<WebState>>) -> WebResult<Json<Value>> {

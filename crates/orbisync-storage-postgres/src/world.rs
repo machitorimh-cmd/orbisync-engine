@@ -22,6 +22,45 @@ pub struct PgWorldDirectoryStore {
 }
 
 impl PgWorldDirectoryStore {
+    /// Bounded, cursor-based scan for runtime stop completion.
+    pub async fn stopping_instances(
+        &self,
+        after: Option<InstanceId>,
+    ) -> Result<Vec<InstanceId>, ApplicationError> {
+        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM world_instances WHERE lifecycle = 'stopping' AND ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT 50")
+            .bind(after.map(|id| id.as_uuid())).fetch_all(&self.pool).await.map_err(Self::map_err)?;
+        ids.into_iter()
+            .map(|id| {
+                InstanceId::new(id).map_err(|e| {
+                    ApplicationError::new(ApplicationErrorKind::PortFailure, e.to_string())
+                })
+            })
+            .collect()
+    }
+
+    /// Finalizes only a stopping instance. The caller must hold its runtime
+    /// lifecycle fence and prove no actor remains (after durable idle reap).
+    pub async fn complete_stop(&self, id: InstanceId) -> Result<bool, ApplicationError> {
+        let Some(mut instance) = self.get_instance(id).await? else {
+            return Ok(false);
+        };
+        if instance.lifecycle().as_str() != "stopping" {
+            return Ok(false);
+        }
+        let previous = i64::try_from(instance.revision().as_u64()).map_err(|_| {
+            ApplicationError::new(ApplicationErrorKind::DomainRule, "revision overflow")
+        })?;
+        instance
+            .finish_stop()
+            .map_err(|e| ApplicationError::new(ApplicationErrorKind::DomainRule, e.to_string()))?;
+        let revision = i64::try_from(instance.revision().as_u64()).map_err(|_| {
+            ApplicationError::new(ApplicationErrorKind::DomainRule, "revision overflow")
+        })?;
+        let result = sqlx::query("UPDATE world_instances SET lifecycle = 'stopped', revision = $2 WHERE id = $1 AND lifecycle = 'stopping' AND revision = $3")
+            .bind(id.as_uuid()).bind(revision).bind(previous).execute(&self.pool).await.map_err(Self::map_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Creates the store, resolving the pagination HMAC key via
     /// `config.auth.pagination_hmac_key_env` (same key shared with
     /// `PgIdentityQueryStore`).

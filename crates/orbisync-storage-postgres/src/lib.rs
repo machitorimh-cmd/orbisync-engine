@@ -214,6 +214,6 @@ mod tests {
         // idempotent runtime effect receipts, session labels, audit indexes and
         // the built-in administrator's operational capabilities.
         let versions: Vec<_> = MIGRATOR.iter().map(|migration| migration.version).collect();
-        assert_eq!(versions, (1_i64..=26).collect::<Vec<_>>());
+        assert_eq!(versions, (1_i64..=27).collect::<Vec<_>>());
     }
 }

@@ -167,6 +167,22 @@ impl WorldInstance {
         Ok(true)
     }
 
+    /// Completes a requested stop after the runtime has durably drained.
+    ///
+    /// # Errors
+    /// Returns invalid-value unless stopping/stopped, or revision overflow.
+    pub fn finish_stop(&mut self) -> Result<bool, DomainError> {
+        match self.lifecycle {
+            InstanceLifecycle::Stopped => return Ok(false),
+            InstanceLifecycle::Stopping => {}
+            _ => return Err(invalid("instance has not requested stop")),
+        }
+        let revision = self.revision.next()?;
+        self.lifecycle = InstanceLifecycle::Stopped;
+        self.revision = revision;
+        Ok(true)
+    }
+
     /// Restores an instance from persisted storage without applying transitions.
     ///
     /// Validates domain invariants (capacity range, revision bounds) but does not
@@ -234,6 +250,10 @@ mod tests {
         assert!(!inst.start(now()).expect("idempotent"));
         assert!(inst.stop().expect("stop"));
         assert_eq!(inst.lifecycle(), InstanceLifecycle::Stopping);
+        assert!(inst.finish_stop().expect("stop completed"));
+        assert_eq!(inst.lifecycle(), InstanceLifecycle::Stopped);
+        assert!(!inst.finish_stop().expect("idempotent completion"));
+        assert!(inst.start(now()).is_err());
     }
 
     #[test]

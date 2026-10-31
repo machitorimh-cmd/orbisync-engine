@@ -318,6 +318,21 @@ async fn managed_postgres_real_runtime_lifecycle_permissions_and_explicit_repair
         .fetch_one(&app).await.unwrap();
     assert_eq!(privileges, (false, false, false, false, false, true, false));
     assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT has_table_privilege(current_user, 'public.audit_source_ips', 'UPDATE')"
+        )
+        .fetch_one(&app)
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        orbisync_storage_postgres::PgAuditSourceIpRetentionStore::new(app.clone())
+            .delete_expired(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
         sqlx::query("CREATE TABLE should_be_forbidden(id INT)")
             .execute(&app)
             .await

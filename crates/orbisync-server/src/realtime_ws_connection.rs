@@ -228,6 +228,24 @@ async fn handle_socket(
                         continue;
                     }
                 };
+                // A directory stop must close admission before an actor can be
+                // restored or created. Runtime actors default to running, so
+                // checking only the actor silently reopened stopped instances.
+                if matches!(inst.lifecycle().as_str(), "stopping" | "stopped") {
+                    send_error(
+                        &mut socket,
+                        "INSTANCE_NOT_RUNNING",
+                        "instance is stopping or stopped".to_owned(),
+                        env.message_id.clone(),
+                        handshake.negotiated_minor,
+                        response_sequence,
+                        state.clock.as_ref(),
+                        &iid.to_string(),
+                    ).await;
+                    let Some(ready) = transition(conn_state, ConnectionEvent::JoinRejected) else { return; };
+                    conn_state = ready;
+                    continue;
+                }
                 let capacity = inst.capacity();
                 let world_id = inst.world_id();
                 let world = match state.world_store.get_world(world_id).await {
@@ -310,6 +328,17 @@ async fn handle_socket(
                         continue;
                     }
                 };
+                // Recheck under the activation/lifecycle fence: a stop may
+                // have completed while checkpoint activation was awaiting it.
+                if !matches!(state.world_store.get_instance(iid).await,
+                    Ok(Some(ref current)) if !matches!(current.lifecycle().as_str(), "stopping" | "stopped")) {
+                    send_error(&mut socket, "INSTANCE_NOT_RUNNING", "instance is stopping or stopped".to_owned(),
+                        env.message_id.clone(), handshake.negotiated_minor, response_sequence,
+                        state.clock.as_ref(), &iid.to_string()).await;
+                    let Some(ready) = transition(conn_state, ConnectionEvent::JoinRejected) else { return; };
+                    conn_state = ready;
+                    continue;
+                }
                 let pres = PresenceId::generate();
                 let outcome = if !state.registry.contains(iid) {
                     CommandOutcome::Rejected {
@@ -660,6 +689,20 @@ async fn handle_socket(
                         continue;
                     }
                 };
+                if matches!(inst.lifecycle().as_str(), "stopping" | "stopped") {
+                    state.metrics_recorder.incr(Counter::ResumeRejected { reason: orbisync_application::metrics::ResumeRejectReason::HistoryUnavailable });
+                    send_error(
+                        &mut socket,
+                        "INSTANCE_NOT_RUNNING",
+                        "instance is stopping or stopped".to_owned(),
+                        env.message_id.clone(),
+                        handshake.negotiated_minor,
+                        response_sequence,
+                        state.clock.as_ref(),
+                        &iid.to_string(),
+                    ).await;
+                    return;
+                }
                 let world_id = inst.world_id();
                 let world = match state.world_store.get_world(world_id).await {
                     Ok(Some(w)) => w,

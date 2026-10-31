@@ -252,6 +252,12 @@ jobs:
         run: node scripts/verify_admin_local_start.cjs
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/apps/admin-console-web/node_modules/@playwright/test
+      - name: Embedded administration language and session regressions
+        run: |
+          node scripts/verify_admin_language.cjs
+          node scripts/verify_admin_operations.cjs
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/apps/admin-console-web/node_modules/@playwright/test
       - name: Both reference apps pagination browser regressions
         working-directory: apps/whiteboard
         run: npm run test:browser

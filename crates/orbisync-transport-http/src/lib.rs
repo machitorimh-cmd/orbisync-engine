@@ -1763,6 +1763,11 @@ async fn request_context(
 ) -> Response {
     let request_id = format!("req_{}", Uuid::now_v7());
     let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", axum::extract::MatchedPath::as_str)
+        .to_owned();
     let path = request.uri().path().to_owned();
     let source_ip = state.resolve_source_ip(
         request.headers(),
@@ -1785,8 +1790,13 @@ async fn request_context(
     );
     let started = Instant::now();
     let mut response = next.run(request).instrument(span.clone()).await;
-    span.record("status", response.status().as_u16());
-    span.record("duration_ms", started.elapsed().as_millis() as u64);
+    let status = response.status().as_u16();
+    let duration_ms = started.elapsed().as_millis() as u64;
+    span.record("status", status);
+    span.record("duration_ms", duration_ms);
+    // The JSON formatter records events, not span lifecycle notifications.
+    // Emit the result explicitly so failed requests can actually be diagnosed.
+    tracing::info!(event = "http.request_completed", %request_id, %method, %route, status, duration_ms);
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(X_REQUEST_ID, value);
     }

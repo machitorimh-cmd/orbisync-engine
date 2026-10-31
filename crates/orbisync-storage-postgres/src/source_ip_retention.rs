@@ -22,13 +22,21 @@ impl PgAuditSourceIpRetentionStore {
         before: OffsetDateTime,
         limit: i64,
     ) -> Result<u64, sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        // Runtime may delete expired source IPs but must never UPDATE them.
+        // SELECT FOR UPDATE requires UPDATE privilege even on an empty table.
+        // DELETE itself locks its candidates; bound contention between workers.
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *transaction)
+            .await?;
         let result = sqlx::query(
-            "WITH expired AS (SELECT audit_event_id FROM audit_source_ips WHERE created_at < $1 ORDER BY created_at ASC, audit_event_id ASC LIMIT $2 FOR UPDATE SKIP LOCKED) DELETE FROM audit_source_ips AS source_ips USING expired WHERE source_ips.audit_event_id = expired.audit_event_id",
+            "WITH expired AS (SELECT audit_event_id FROM audit_source_ips WHERE created_at < $1 ORDER BY created_at ASC, audit_event_id ASC LIMIT $2) DELETE FROM audit_source_ips AS source_ips USING expired WHERE source_ips.audit_event_id = expired.audit_event_id",
         )
         .bind(before)
         .bind(limit.max(1))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(result.rows_affected())
     }
 }
