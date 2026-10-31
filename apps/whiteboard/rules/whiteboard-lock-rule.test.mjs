@@ -90,7 +90,10 @@ test('the signature covers the raw body bytes exactly as Core signs them', () =>
   };
   assert.equal(verifySignature(raw, headers, secret), true);
   assert.equal(verifySignature(Buffer.concat([raw, Buffer.from(' ')]), headers, secret), false);
-  assert.equal(verifySignature(raw, { ...headers, 'x-orbisync-signature': sign(timestamp, event, raw).replace(/.$/, 'f') }, secret), false);
+  // A fixed replacement can accidentally leave the original hex digit intact.
+  const signature = headers['x-orbisync-signature'];
+  const tampered = signature.slice(0, -1) + (signature.endsWith('f') ? 'e' : 'f');
+  assert.equal(verifySignature(raw, { ...headers, 'x-orbisync-signature': tampered }, secret), false);
   assert.equal(verifySignature(raw, { ...headers, 'x-orbisync-event-id': crypto.randomUUID() }, secret), false);
   const stale = String(Math.floor(Date.now() / 1000) - 301);
   assert.equal(verifySignature(raw, { ...headers, 'x-orbisync-timestamp': stale, 'x-orbisync-signature': sign(stale, event, raw) }, secret), false);
